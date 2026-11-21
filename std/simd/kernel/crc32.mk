@@ -173,20 +173,26 @@ Crc32Wide(c: u32, data: []u8, fold: mut [16]u8): int cpu "sse2, pclmul, aes, avx
         d2 := CrcWide(w, 64)
         d1 := CrcWide(w, 128)
         d0 := CrcWide(w, 192)
-        unsafe "vpclmulqdq and vpternlogq read and write only these zmm registers; the clause names avx512f and vpclmulqdq" {
-            asm("vpclmulqdq {t3}, {x3}, {k}, 0x00\nvpclmulqdq {t2}, {x2}, {k}, 0x00\nvpclmulqdq {t1}, {x1}, {k}, 0x00\nvpclmulqdq {t0}, {x0}, {k}, 0x00\nvpclmulqdq {x3}, {x3}, {k}, 0x11\nvpclmulqdq {x2}, {x2}, {k}, 0x11\nvpclmulqdq {x1}, {x1}, {k}, 0x11\nvpclmulqdq {x0}, {x0}, {k}, 0x11\nvpternlogq {x3}, {t3}, {d3}, 0x96\nvpternlogq {x2}, {t2}, {d2}, 0x96\nvpternlogq {x1}, {t1}, {d1}, 0x96\nvpternlogq {x0}, {t0}, {d0}, 0x96",
-                x3: inout(zmm_reg) x3, x2: inout(zmm_reg) x2, x1: inout(zmm_reg) x1, x0: inout(zmm_reg) x0,
-                t3: out(zmm_reg) t3, t2: out(zmm_reg) t2, t1: out(zmm_reg) t1, t0: out(zmm_reg) t0,
-                k: in(zmm_reg) kz, d3: in(zmm_reg) d3, d2: in(zmm_reg) d2, d1: in(zmm_reg) d1, d0: in(zmm_reg) d0,
-                options(pure, nomem, nostack))
+        // The arch test keeps the x86 asm out of an aarch64 build, where
+        // Crc32Fold never calls this.
+        if Target.arch == Arch.X64 {
+            unsafe "vpclmulqdq and vpternlogq read and write only these zmm registers; the clause names avx512f and vpclmulqdq" {
+                asm("vpclmulqdq {t3}, {x3}, {k}, 0x00\nvpclmulqdq {t2}, {x2}, {k}, 0x00\nvpclmulqdq {t1}, {x1}, {k}, 0x00\nvpclmulqdq {t0}, {x0}, {k}, 0x00\nvpclmulqdq {x3}, {x3}, {k}, 0x11\nvpclmulqdq {x2}, {x2}, {k}, 0x11\nvpclmulqdq {x1}, {x1}, {k}, 0x11\nvpclmulqdq {x0}, {x0}, {k}, 0x11\nvpternlogq {x3}, {t3}, {d3}, 0x96\nvpternlogq {x2}, {t2}, {d2}, 0x96\nvpternlogq {x1}, {t1}, {d1}, 0x96\nvpternlogq {x0}, {t0}, {d0}, 0x96",
+                    x3: inout(zmm_reg) x3, x2: inout(zmm_reg) x2, x1: inout(zmm_reg) x1, x0: inout(zmm_reg) x0,
+                    t3: out(zmm_reg) t3, t2: out(zmm_reg) t2, t1: out(zmm_reg) t1, t0: out(zmm_reg) t0,
+                    k: in(zmm_reg) kz, d3: in(zmm_reg) d3, d2: in(zmm_reg) d2, d1: in(zmm_reg) d1, d0: in(zmm_reg) d0,
+                    options(pure, nomem, nostack))
+            }
         }
         i += 256
     }
     // x3 onto x2, the sum onto x1, that onto x0: 64 bytes apart each.
-    unsafe "vpclmulqdq and vpternlogq read and write only these zmm registers; the clause names avx512f and vpclmulqdq" {
-        asm("vpclmulqdq {t3}, {x3}, {k}, 0x00\nvpclmulqdq {x3}, {x3}, {k}, 0x11\nvpternlogq {x2}, {t3}, {x3}, 0x96\nvpclmulqdq {t3}, {x2}, {k}, 0x00\nvpclmulqdq {x2}, {x2}, {k}, 0x11\nvpternlogq {x1}, {t3}, {x2}, 0x96\nvpclmulqdq {t3}, {x1}, {k}, 0x00\nvpclmulqdq {x1}, {x1}, {k}, 0x11\nvpternlogq {x0}, {t3}, {x1}, 0x96",
-            x3: inout(zmm_reg) x3, x2: inout(zmm_reg) x2, x1: inout(zmm_reg) x1, x0: inout(zmm_reg) x0,
-            t3: out(zmm_reg) t3, k: in(zmm_reg) k4, options(pure, nomem, nostack))
+    if Target.arch == Arch.X64 {
+        unsafe "vpclmulqdq and vpternlogq read and write only these zmm registers; the clause names avx512f and vpclmulqdq" {
+            asm("vpclmulqdq {t3}, {x3}, {k}, 0x00\nvpclmulqdq {x3}, {x3}, {k}, 0x11\nvpternlogq {x2}, {t3}, {x3}, 0x96\nvpclmulqdq {t3}, {x2}, {k}, 0x00\nvpclmulqdq {x2}, {x2}, {k}, 0x11\nvpternlogq {x1}, {t3}, {x2}, 0x96\nvpclmulqdq {t3}, {x1}, {k}, 0x00\nvpclmulqdq {x1}, {x1}, {k}, 0x11\nvpternlogq {x0}, {t3}, {x1}, 0x96",
+                x3: inout(zmm_reg) x3, x2: inout(zmm_reg) x2, x1: inout(zmm_reg) x1, x0: inout(zmm_reg) x0,
+                t3: out(zmm_reg) t3, k: in(zmm_reg) k4, options(pure, nomem, nostack))
+        }
     }
     y := x0.ToArray()
     l3 := simd.Vec[u64, 2].FromArray([y[0], y[1]])
