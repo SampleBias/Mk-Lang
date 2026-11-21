@@ -1,0 +1,58 @@
+name: diag-oom
+on:
+  push:
+    branches: [diag-oom]
+permissions:
+  contents: read
+env:
+  SHARD_COUNT: "8"
+  LLVM_VERSION: 21.1.8
+jobs:
+  oom:
+    name: ${{ matrix.what }}
+    strategy:
+      fail-fast: false
+      matrix:
+        what: [alone-8, alone-4, shard0-4, shard0-8]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5
+        with:
+          go-version: 1.27.x
+          cache: false
+      - name: LLVM
+        env:
+          LLVM_APT_KEY: 6084F3CF814B57C1CF12EFD515CF4D18AF4F7421
+        run: |
+          . /etc/os-release
+          major=${LLVM_VERSION%%.*}
+          curl -fsSL -o "$RUNNER_TEMP/llvm.asc" https://apt.llvm.org/llvm-snapshot.gpg.key
+          fpr=$(gpg --show-keys --with-colons "$RUNNER_TEMP/llvm.asc" | awk -F: '$1 == "fpr" { print $10; exit }')
+          [ "$fpr" = "$LLVM_APT_KEY" ] || exit 1
+          gpg --dearmor < "$RUNNER_TEMP/llvm.asc" | sudo tee /usr/share/keyrings/llvm.gpg >/dev/null
+          echo "deb [signed-by=/usr/share/keyrings/llvm.gpg] https://apt.llvm.org/$VERSION_CODENAME/ llvm-toolchain-$VERSION_CODENAME-$major main" | sudo tee /etc/apt/sources.list.d/llvm.list
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends "clang-$major" "lld-$major" "llvm-$major"
+      - name: Machine
+        run: nproc; free -m; swapon --show || true
+      - name: Test
+        env:
+          WHAT: ${{ matrix.what }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/tmp"; export TMPDIR="$RUNNER_TEMP/tmp" MK_CACHE="$RUNNER_TEMP/mkcache"
+          case "$WHAT" in *-8) sed -i 's/make(\[\]\[\]byte, 4)/make([][]byte, 8)/; s/make(\[\]string, 4)/make([]string, 8)/' internal/driver/incremental_test.go ;; esac
+          grep -n 'make(\[\]\[\]byte' internal/driver/incremental_test.go
+          (peak=0; while true; do u=$(free -m | awk 'NR==2{print $3}'); [ "$u" -gt "$peak" ] && peak=$u && echo "$peak" > "$RUNNER_TEMP/peak"; sleep 1; done) &
+          set +e
+          case "$WHAT" in
+            alone-*) go test -count=1 -v ./internal/driver -run '^TestConcurrentBuildsShareCache$' 2>&1 | tail -5 ;;
+            shard0-*) CI_MODE=driver SHARD_INDEX=0 bash tools/ci/test.sh 2>&1 | grep -E 'ConcurrentBuilds|^(ok|FAIL)|--- FAIL' | head -40 ;;
+          esac
+          echo "peak used MiB: $(cat "$RUNNER_TEMP/peak")"
