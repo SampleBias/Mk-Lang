@@ -13,7 +13,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        ref: [feae1174, 2b478690]
+        ref: [feae11747a44d96e66e4c25920fd905927dc3cc3, 2b47869021e85919258cffbf190a971726442906]
         n: [1, 2, 3, 4, 5]
     runs-on: windows-2025
     timeout-minutes: 60
