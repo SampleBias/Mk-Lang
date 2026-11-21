@@ -1,0 +1,60 @@
+name: diag-fault
+on:
+  push:
+    branches: [diag-fault]
+permissions:
+  contents: read
+env:
+  LLVM_VERSION: 21.1.8
+  LLVM_WIN64_SHA256: 7a5386c26497db1691f320121e5b113364dd0274b98e55f15f4dbc00c0450113
+jobs:
+  fault:
+    name: ${{ matrix.ref }} ${{ matrix.n }}
+    strategy:
+      fail-fast: false
+      matrix:
+        ref: [feae1174, 2b478690]
+        n: [1, 2, 3, 4, 5]
+    runs-on: windows-2025
+    timeout-minutes: 60
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+          ref: ${{ matrix.ref }}
+      - uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5
+        with:
+          go-version: 1.27.x
+          cache: false
+      - name: CPU
+        shell: pwsh
+        run: |
+          Get-CimInstance Win32_Processor | Format-List Name, NumberOfLogicalProcessors
+          (Get-CimInstance Win32_ComputerSystem).TotalPhysicalMemory
+          Get-CimInstance Win32_DeviceGuard -Namespace root\Microsoft\Windows\DeviceGuard -ErrorAction SilentlyContinue | Format-List SecurityServicesRunning, VirtualizationBasedSecurityStatus
+      - name: Temporary directory
+        run: |
+          tmp=$(cygpath -w "$RUNNER_TEMP/tmp"); cache=$(cygpath -w "$RUNNER_TEMP/mkcache")
+          mkdir -p "$RUNNER_TEMP/tmp" "$RUNNER_TEMP/mkcache"
+          echo "TMP=$tmp" >> "$GITHUB_ENV"; echo "TEMP=$tmp" >> "$GITHUB_ENV"; echo "MK_CACHE=$cache" >> "$GITHUB_ENV"
+      - name: LLVM
+        run: |
+          llvm="/c/Program Files/LLVM"
+          if [ -x "$llvm/Uninstall.exe" ]; then
+            MSYS_NO_PATHCONV=1 "$llvm/Uninstall.exe" /S
+            for _ in $(seq 120); do
+              [ -e "$llvm/bin/clang.exe" ] || [ -e "$llvm/Uninstall.exe" ] || break
+              sleep 5
+            done
+          fi
+          cd "$RUNNER_TEMP"
+          curl -fsSL --retry 3 -o llvm.exe "https://github.com/llvm/llvm-project/releases/download/llvmorg-$LLVM_VERSION/LLVM-$LLVM_VERSION-win64.exe"
+          echo "$LLVM_WIN64_SHA256  llvm.exe" | sha256sum -c -
+          MSYS_NO_PATHCONV=1 ./llvm.exe /S
+      - name: Fault tests
+        run: go test -p 1 -count=1 -v ./internal/corpus -run 'TestPanics/panics/stack_|TestPrograms/cseh|TestPrograms/coderegion' 2>&1 | grep -E '^\s*(---|ok|FAIL|panic|.*programs_test)' || true
+      - name: Overflow test
+        run: go test -p 1 -count=1 ./internal/driver -run 'TestMkOverflowStillMk' 2>&1 | tail -20 || true
