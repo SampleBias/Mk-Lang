@@ -9,38 +9,35 @@ env:
   LLVM_WIN64_SHA256: 7a5386c26497db1691f320121e5b113364dd0274b98e55f15f4dbc00c0450113
 jobs:
   fault:
-    name: ${{ matrix.ref }} ${{ matrix.n }}
+    name: win ${{ matrix.n }}
     strategy:
       fail-fast: false
       matrix:
-        ref: [feae11747a44d96e66e4c25920fd905927dc3cc3, 2b47869021e85919258cffbf190a971726442906]
-        n: [1, 2, 3, 4, 5]
+        n: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14]
     runs-on: windows-2025
     timeout-minutes: 60
     defaults:
       run:
         shell: bash
     steps:
+      - name: CPU
+        id: cpu
+        shell: pwsh
+        run: |
+          $n = (Get-CimInstance Win32_Processor | Select-Object -First 1).Name
+          "CPU: $n"
+          if ($n -match 'Intel') { "intel=1" >> $env:GITHUB_OUTPUT }
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        if: steps.cpu.outputs.intel == '1'
         with:
           persist-credentials: false
-          ref: ${{ matrix.ref }}
       - uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5
+        if: steps.cpu.outputs.intel == '1'
         with:
           go-version: 1.27.x
           cache: false
-      - name: CPU
-        shell: pwsh
-        run: |
-          Get-CimInstance Win32_Processor | Format-List Name, NumberOfLogicalProcessors
-          (Get-CimInstance Win32_ComputerSystem).TotalPhysicalMemory
-          Get-CimInstance Win32_DeviceGuard -Namespace root\Microsoft\Windows\DeviceGuard -ErrorAction SilentlyContinue | Format-List SecurityServicesRunning, VirtualizationBasedSecurityStatus
-      - name: Temporary directory
-        run: |
-          tmp=$(cygpath -w "$RUNNER_TEMP/tmp"); cache=$(cygpath -w "$RUNNER_TEMP/mkcache")
-          mkdir -p "$RUNNER_TEMP/tmp" "$RUNNER_TEMP/mkcache"
-          echo "TMP=$tmp" >> "$GITHUB_ENV"; echo "TEMP=$tmp" >> "$GITHUB_ENV"; echo "MK_CACHE=$cache" >> "$GITHUB_ENV"
       - name: LLVM
+        if: steps.cpu.outputs.intel == '1'
         run: |
           llvm="/c/Program Files/LLVM"
           if [ -x "$llvm/Uninstall.exe" ]; then
@@ -54,7 +51,26 @@ jobs:
           curl -fsSL --retry 3 -o llvm.exe "https://github.com/llvm/llvm-project/releases/download/llvmorg-$LLVM_VERSION/LLVM-$LLVM_VERSION-win64.exe"
           echo "$LLVM_WIN64_SHA256  llvm.exe" | sha256sum -c -
           MSYS_NO_PATHCONV=1 ./llvm.exe /S
-      - name: Fault tests
-        run: go test -p 1 -count=1 -v ./internal/corpus -run 'TestPanics/panics/stack_|TestPrograms/cseh|TestPrograms/coderegion' 2>&1 | grep -E '^\s*(---|ok|FAIL|panic|.*programs_test)' || true
-      - name: Overflow test
-        run: go test -p 1 -count=1 ./internal/driver -run 'TestMkOverflowStillMk' 2>&1 | tail -20 || true
+      - name: XSAVE
+        if: steps.cpu.outputs.intel == '1'
+        run: |
+          "/c/Program Files/LLVM/bin/clang.exe" -O1 -o "$RUNNER_TEMP/xsave.exe" .github/diag/xsave.c
+          "$RUNNER_TEMP/xsave.exe"
+      - name: Build programs
+        if: steps.cpu.outputs.intel == '1'
+        run: |
+          go build -o "$RUNNER_TEMP/mk.exe" ./cmd/mk
+          "$RUNNER_TEMP/mk.exe" build -debug -o "$RUNNER_TEMP/sm.exe" tests/programs/panics/stack_main.mk
+          (cd tests/programs/cseh && "$RUNNER_TEMP/mk.exe" build -debug -o "$RUNNER_TEMP/cseh.exe" .)
+          "$RUNNER_TEMP/sm.exe" > "$RUNNER_TEMP/sm.out" 2>&1; echo "sm exit $?"; head -3 "$RUNNER_TEMP/sm.out"
+          "$RUNNER_TEMP/cseh.exe"; echo "cseh exit $?"
+      - name: cdb
+        if: steps.cpu.outputs.intel == '1'
+        shell: pwsh
+        run: |
+          $cdb = 'C:\Program Files (x86)\Windows Kits\10\Debuggers\x64\cdb.exe'
+          $env:_NT_SYMBOL_PATH = "srv*$env:RUNNER_TEMP\sym*https://msdl.microsoft.com/download/symbols;$env:RUNNER_TEMP"
+          foreach ($p in 'sm', 'cseh') {
+            "===== $p"
+            & $cdb -g -G -o -c "sxd av; sxd sov; sxd ii; g; .echo CRASH; .exr -1; r; .frame 0; u @rip-0x20 L12; kn 60; !teb; q" "$env:RUNNER_TEMP\$p.exe" 2>&1 | Select-Object -Last 160
+          }
