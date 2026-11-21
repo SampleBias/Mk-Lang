@@ -2,7 +2,7 @@
 // to sorting in place, so where its memory comes from, how much it takes,
 // that it gives it back, and that the fallback sorts, all need a test, as do
 // the lengths around the scratch's limits.
-// What: tests of core_drift.mk: the registered heap, the scratch's block
+// What: tests of mem_drift.mk: the registered heap, the scratch's block
 // and its free through a counting allocator, the fallback when that fails,
 // every length to 1,100 and on to 5,000, lengths whose scratch is only half
 // the slice, and a less that panics mid-sort.

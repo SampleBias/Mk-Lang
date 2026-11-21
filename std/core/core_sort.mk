@@ -3,11 +3,11 @@
 // and the stable sort needs one that allocates nothing for when it has no
 // scratch memory.
 //
-// What: Slice[T].Sort (pdqsort), Slice[T].SortStable, Slice[T].Search and
-// StableSort (a block merge sort), with their partition, network,
-// insertion, heap and merge helpers. SortStable's body, which merges
-// through scratch memory, is core_drift.mk's DriftStable; StableSort is
-// its in-place sort, for when it has none. SortStableIn is in coll_sort.mk.
+// What: Slice[T].Sort (pdqsort), Slice[T].Search and StableSort (a block
+// merge sort), with their partition, network, insertion, heap and merge
+// helpers. StableSort is SortStable's in-place sort, for when it has no
+// scratch memory; SortStable and SortStableIn, which allocate, are in
+// coll_sort.mk.
 //
 // How: Sort is Go's pdqsort_func (Go 1.27, zsortfunc.go): ninther pivots,
 // pattern breaking with a xorshift seeded by the length, heapsort after too
@@ -52,7 +52,7 @@
 // (PdqInsertFrom: Sort's leaves, StableSort's base runs and second buffer,
 // DriftSort's small sorts), the Lomuto partition (an element of at most 32
 // bytes), a merge through StableSort's cache, and DriftSort's partitions
-// and merges through its scratch (core_drift.mk), a slot keeps a stale copy
+// and merges through its scratch (mem_drift.mk), a slot keeps a stale copy
 // until the move that fills it, so a less that reads the slice through a
 // capture may see one value twice and another not at all.
 //
@@ -684,30 +684,6 @@ Pdq[T](s: mut []T, a0: int, b0: int, limit0: int, const less: fn(&T, &T): bool) 
             b = mid
         }
     }
-}
-
-/// Sorts the elements by less, keeping equal elements in their order.
-/// O(n log n) calls of less and moves on every input. It allocates: past
-/// 20 elements it merges through scratch memory of Len() / 2 elements or
-/// more (the whole slice while that is at most 8,000,000 bytes), on the
-/// stack when that fits in 4,096 bytes and T is aligned to at most 8, else
-/// from the process heap, freed before it returns; through scratch, input
-/// that is already sorted or strictly descending costs O(n). When its
-/// scratch is larger than the stack's and the heap is out of memory, at
-/// compile time or in a freestanding program, it sorts in place instead,
-/// with the same result. SortStableIn takes the scratch from an allocator
-/// it is given. The algorithm is Rust's driftsort, and in place a block
-/// merge sort.
-export Slice[T].SortStable(mut self, const less: fn(&T, &T): bool) {
-    s := self.ItemsMut()
-    // A short slice is one insertion sort (StableSort's and DriftStable's
-    // first step), here, so it enters no frame that holds a stack scratch
-    // or cache.
-    if s.Len() <= DriftInsertMax {
-        PdqInsertion(s, 0, s.Len(), less)
-        return
-    }
-    DriftStable(s, less)
 }
 
 /// Binary search: on a slice where less(element, key) holds for a prefix

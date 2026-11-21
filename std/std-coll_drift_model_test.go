@@ -1,7 +1,7 @@
 // Why: SortStable and SortStableIn sort through scratch memory by a port
 // of Rust's driftsort, whose many size-dependent paths the Mk tests check
 // against a model that must follow the Mk body exactly.
-// What: the Go model of core_drift.mk's DriftStable, DriftIn and DriftSort
+// What: the Go model of mem_drift.mk's DriftStable, DriftIn and DriftSort
 // (driftStable, bufSort, drift and its helpers, on blkModel) and
 // TestStdColl_DriftModelMatchesGo.
 // How: statement for statement, counting less calls and moves, with a
@@ -20,7 +20,7 @@ import (
 	"testing"
 )
 
-// The constants of core_drift.mk.
+// The constants of mem_drift.mk.
 const (
 	driftInsertMax = 20
 	driftSmall     = 32

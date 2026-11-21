@@ -1,7 +1,7 @@
 // Why: the stable sorts have many size-dependent paths, and each must stay
 // stable and do exactly what the Go models do.
 // What: TestStdColl_BlockMergeMatchesGo over Slice[T].SortStable,
-// SortStableIn (core_drift.mk, coll_sort.mk) and SortStable's in-place sort
+// SortStableIn (mem_drift.mk, coll_sort.mk) and SortStable's in-place sort
 // (core_sort.mk's StableSort, through the sortFix fixture).
 // How: a Mk program sorts every blkPattern around the block sizes; digests
 // must match slices.SortStableFunc and less counts the models'.
