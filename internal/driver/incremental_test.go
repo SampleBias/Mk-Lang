@@ -384,16 +384,17 @@ func TestCacheVerifyShadowMode(t *testing.T) {
 	}
 }
 
-// TestConcurrentBuildsShareCache: eight builds of one package into
-// one cache at once all succeed with byte-identical executables, and a
-// build after them compiles nothing.
+// TestConcurrentBuildsShareCache: four builds of one package into one
+// cache at once (each cold build of std holds about 2 GB, so eight ran a
+// 16 GB runner out of memory) all succeed with byte-identical
+// executables, and a build after them compiles nothing.
 func TestConcurrentBuildsShareCache(t *testing.T) {
 	tools := needTools(t)
 	dir := writeTree(t, incPkg("x + 1"))
 	cacheDir := filepath.Join(t.TempDir(), "cache")
 	out := t.TempDir()
-	exes := make([][]byte, 8)
-	errs := make([]string, 8)
+	exes := make([][]byte, 4)
+	errs := make([]string, 4)
 	done := make(chan int)
 	for i := range exes {
 		go func() {
