@@ -4,13 +4,14 @@
 //
 // What: str.Len and str.AsBytes (intrinsics), Byte, Find, Has, StartsWith,
 // EndsWith, Trim, Split, Lines, Words and Scalars, and the helpers FindFrom,
-// MaxSuffix, BytesEqual, SpaceAt and LoadWord.
+// TwoWay, MaxSuffix, BytesEqual, SpaceAt and LoadWord.
 //
-// How: a one-byte search is IndexByteIn's memchr; a longer one is the
-// Two-Way algorithm, O(n + m) time and O(1) space. Byte compares and the
-// one-byte search are std.simd's past their short paths, except on
-// x86_64-freestanding, where std.core's own word-at-a-time forms cost fewer
-// compile-time steps.
+// How: a one-byte search is IndexByteIn's memchr; a longer one is
+// core_find.mk's vector pair prefilter, handing over to the Two-Way
+// algorithm when it stops paying, O(n + m) time and O(1) space. Byte
+// compares and the one-byte search are std.simd's past their short paths,
+// except on x86_64-freestanding, where std.core's own word-at-a-time forms
+// cost fewer compile-time steps.
 
 import std.raw
 import std.simd
@@ -128,10 +129,13 @@ export str.Scalars(self): Scalars {
 /// (code 2). O(n + m) time in the worst case and O(1) space; allocates
 /// nothing.
 ///
-/// A one-byte sub is a byte scan, vectorized past 32 bytes. A longer one
-/// uses the Two-Way algorithm (Crochemore and Perrin), so a needle such as
-/// "aaa...ab" in "aaa...a" stays linear, and it can skip a needle length
-/// when the byte under the needle's last position does not occur in it.
+/// A one-byte sub is a byte scan, vectorized past 32 bytes. A longer one is
+/// a vector prefilter: two bytes of sub (rare ones on a long text) are
+/// compared at 16 starts a step (32 where the CPU has avx2), and each start
+/// where both are in place is verified. When verification stops paying
+/// (many near misses, as with "aaa...ab" in "aaa...a"), the rest of the
+/// search is the Two-Way algorithm (Crochemore and Perrin), which keeps the
+/// call linear. On x86_64-freestanding it is Two-Way alone.
 export FindFrom(s: str, sub: str, from: int): ?int {
     n := s.Len()
     m := sub.Len()
@@ -149,6 +153,26 @@ export FindFrom(s: str, sub: str, from: int): ?int {
     }
     b := s.AsBytes()
     p := sub.AsBytes()
+    r := PairFind(b, p, from)
+    if r >= 0 {
+        return some(r)
+    }
+    if r == -1 {
+        return none
+    }
+    return TwoWay(b, p, -2 - r)
+}
+
+// TwoWay is the Two-Way search of p in b from start from, where 2 <=
+// p.Len() (FindFrom's checks): the offset of the first match, or none. It
+// can skip a needle length when the byte under the needle's last position
+// does not occur in it.
+TwoWay(b: []u8, p: []u8, from: int): ?int {
+    n := b.Len()
+    m := p.Len()
+    if m > n - from {
+        return none
+    }
     l1 := MaxSuffix(p, false)
     l2 := MaxSuffix(p, true)
     var crit := l1.left

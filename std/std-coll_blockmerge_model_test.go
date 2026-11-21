@@ -1,7 +1,9 @@
 // Why: the Mk stable sorts are checked against models that count every less
 // call and move, so the models must be right themselves.
-// What: Go models of StableSort (core_sort.mk) and BufSort (coll_sort.mk),
-// TestStdColl_BlockMergeModel* and TestStdColl_BlockMergeCounts.
+// What: the Go model of StableSort (core_sort.mk), SortStable's in-place
+// sort, TestStdColl_BlockMergeModel* and TestStdColl_BlockMergeCounts, which
+// also run the model of the sort through scratch (bufSort,
+// std-coll_drift_model_test.go).
 // How: the models follow the Mk bodies statement for statement; here they run
 // alone over many more inputs, and under relations that are no order.
 
@@ -48,6 +50,12 @@ type blkModel[T any] struct {
 	cbuf  []T
 	live  []bool
 	clive []bool
+	// size is the element's bytes, which set the drift model's scratch
+	// (std-coll_drift_model_test.go; 16 when 0), sbuf the scratch and
+	// slive which of its slots hold a value.
+	size  int
+	sbuf  []T
+	slive []bool
 }
 
 // blkCacheCap is core_sort.mk's BlkCacheCap for an element of size bytes
@@ -704,89 +712,6 @@ func (m *blkModel[T]) level(it *blkIter) {
 	}
 }
 
-// bufSort is BufSort (SortStableIn's body for n >= 2 * blkRun): the same
-// base runs, then each level's pairs merged through a buffer of n / 2
-// slots, the shorter run moved out.
-func (m *blkModel[T]) bufSort() {
-	n := len(m.s)
-	if n < 2*blkRun {
-		m.stableSort()
-		return
-	}
-	buf := make([]T, n/2)
-	it := newBlkIter(n)
-	for !it.done() {
-		a := it.dec
-		b := it.next()
-		m.insertion(a, b)
-	}
-	for {
-		it.begin()
-		for !it.done() {
-			a := it.dec
-			mid := it.next()
-			b := it.next()
-			m.bufMerge(buf, a, mid, b)
-		}
-		if !it.nextLevel() {
-			break
-		}
-	}
-}
-
-func (m *blkModel[T]) ltBuf(i int, buf []T, j int) bool {
-	m.cmps++
-	return m.less(&m.s[i], &buf[j])
-}
-
-func (m *blkModel[T]) ltFromBuf(buf []T, j int, i int) bool {
-	m.cmps++
-	return m.less(&buf[j], &m.s[i])
-}
-
-// bufMerge is BufMerge.
-func (m *blkModel[T]) bufMerge(buf []T, a, mid, b int) {
-	if !m.lt(mid, mid-1) {
-		return
-	}
-	na, nb := mid-a, b-mid
-	if na <= nb {
-		copy(buf, m.s[a:mid])
-		m.moves += na
-		i, j, k := 0, mid, a
-		for i < na && j < b {
-			if m.ltBuf(j, buf, i) {
-				m.s[k] = m.s[j]
-				j++
-			} else {
-				m.s[k] = buf[i]
-				i++
-			}
-			m.moves++
-			k++
-		}
-		copy(m.s[k:], buf[i:na])
-		m.moves += na - i
-	} else {
-		copy(buf, m.s[mid:b])
-		m.moves += nb
-		i, j, k := mid-1, nb-1, b-1
-		for j >= 0 && i >= a {
-			if m.ltFromBuf(buf, j, i) {
-				m.s[k] = m.s[i]
-				i--
-			} else {
-				m.s[k] = buf[j]
-				j--
-			}
-			m.moves++
-			k--
-		}
-		copy(m.s[a:], buf[:j+1])
-		m.moves += j + 1
-	}
-}
-
 // blkKey is the 16-byte pair every test sorts, as the Mk tests' P.
 type blkKey struct{ k, id int }
 
@@ -798,8 +723,9 @@ func blkPairs(keys []int) []blkKey {
 	return xs
 }
 
-// blkRunModel sorts keys' pairs by key with the model (buffered when buf
-// is set) and returns the model with its counts.
+// blkRunModel sorts keys' pairs by key with StableSort's model, or with
+// SortStableIn's (DriftSort, 16-byte elements) when buf is set, and returns
+// the model with its counts.
 func blkRunModel(keys []int, buf bool, cache int) *blkModel[blkKey] {
 	m := &blkModel[blkKey]{s: blkPairs(keys), less: func(a, b *blkKey) bool { return a.k < b.k }, cache: cache}
 	if buf {
@@ -1061,7 +987,7 @@ func TestStdColl_BlockMergeCounts(t *testing.T) {
 		w := blkRunModel(keys, false, blkCacheCap(16, 8))
 		b := blkRunModel(keys, true, 0)
 		nl := float64(n * bits.Len(uint(n)))
-		t.Logf("n=%d %-12s per n log2 n: sort.Stable less %.2f moves %.2f | StableSort less %.2f moves %.2f | BufSort less %.2f moves %.2f",
+		t.Logf("n=%d %-12s per n log2 n: sort.Stable less %.2f moves %.2f | StableSort less %.2f moves %.2f | DriftSort less %.2f moves %.2f",
 			n, name, float64(gc)/nl, float64(gm)/nl, float64(w.cmps)/nl, float64(w.moves)/nl, float64(b.cmps)/nl, float64(b.moves)/nl)
 	}
 	for _, n := range []int{1 << 10, 1 << 14, 1 << 20} {

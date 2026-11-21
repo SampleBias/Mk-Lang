@@ -2,7 +2,7 @@
 // first and back with memory later, page by page.
 //
 // What: Windows page calls: Reserve, Commit, CommitStack, Decommit,
-// Discard, Release, GuardPage and GuardStack.
+// Discard, Release, GuardPage, GuardStack and AddressLimited.
 //
 // How: VirtualAlloc and VirtualFree. Reserving commits nothing; Commit is
 // charged against the commit limit. A task slot's guard is a PAGE_GUARD
@@ -85,6 +85,14 @@ export Decommit(p: *u8, size: int) {
 /// size bytes.
 export Discard(p: *u8, size: int) {
     Decommit(p, size)
+}
+
+/// AddressLimited has std/sys/linux's contract; always false: Windows
+/// limits no process's address space below its size (a job object limits
+/// committed memory, which Commit already meets).
+/// O(1); allocates nothing.
+export AddressLimited(): bool {
+    return false
 }
 
 /// Release frees the whole reservation that Reserve returned at p.

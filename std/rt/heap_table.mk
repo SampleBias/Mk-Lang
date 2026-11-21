@@ -10,6 +10,7 @@
 
 import std.core
 import std.raw
+import std.sys
 
 /// HeapTable is the process Heap's table: each entry calls the heap.
 export const HeapTable = core.AllocTable(alloc: HeapAllocEntry, resize: HeapResizeEntry, free: HeapFreeEntry)
@@ -65,4 +66,13 @@ export HeapInit() {
     // Without magazines every allocation takes the shared lock; nothing
     // else changes.
     _ = MagInit()
+    // Huge blocks reserve room to grow in place unless the address space
+    // is limited (HugeSpareBudget).
+    if !sys.AddressLimited() {
+        unsafe "the RtState page, before any task exists" {
+            (*HS()).spare.Store(HugeSpareBudget)
+        }
+    }
+    // SortStable's scratch comes from the process heap.
+    core.SortHeapInit(ProcessHeap())
 }

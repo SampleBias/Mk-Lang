@@ -272,6 +272,9 @@ var memStdKeep = map[string]bool{
 	// pkg.mk selects std.linux's directory on every target, std.sim's
 	// test blocks import std.runtime, whose test blocks import std.vm.
 	"linux": true, "runtime": true, "vm": true,
+	// pkg.mk selects std.sys.lc's directory (lc/other, lc/macos) on every
+	// target.
+	"lc": true,
 }
 
 // unsafeList is the unsafe_modules list of pkg.mk.

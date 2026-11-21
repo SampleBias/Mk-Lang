@@ -11,6 +11,8 @@
 // std-coll_owner_test.go. Helper names start with Tm, because every file of
 // std/core is one module.
 
+import std.raw
+
 // TmChosen is a hash whose probe starts at pos (H1, bits 7 and up) with the
 // tag tag (H2, the top seven bits), for exact probe layouts.
 TmChosen(pos: int, tag: int): u64 {
@@ -137,26 +139,38 @@ test "Set adds, finds and removes members" (sys: &System) {
     Assert(s.Remove(&"x") && !s.Remove(&"x") && !s.Has(&"x"))
 }
 
+// TmFreeKey is key i of the free test: "the long key number i" when 3
+// divides i, else "k" and i.
+TmFreeKey(ar: &Arena, i: int): OutOfMemory!str from ar {
+    if i % 3 == 0 {
+        return try ar.Fmt("the long key number {i}", (i))
+    }
+    return try ar.Fmt("k{i}", (i))
+}
+
 test "HeapMap and TextMap free every byte" (sys: &System) {
     a := sys.heap.Alloc()
     var h := HeapMap[int, int].New(a)
     defer h.Free(a)
     var t := TextMap[int].New(a)
     defer t.Free(a)
+    // Every third key is 16 bytes or more, so the map copies it; the
+    // rest it keeps in their slots.
     for i in 0..3_000 {
         try h.Set(a, i, i)
-        key := try sys.arena.Fmt("k{i}", (i))
+        key := try TmFreeKey(sys.arena, i)
         v := try t.Ensure(a, key, i)
         *v += 1
     }
     for i in 0..3_000 {
         if i % 2 == 0 {
             Assert(h.Remove(&i).Must() == i)
-            key := try sys.arena.Fmt("k{i}", (i))
+            key := try TmFreeKey(sys.arena, i)
             Assert(t.Remove(a, key).Must() == i + 1)
         }
     }
     Assert(h.Len() == 1_500 && t.Len() == 1_500 && *t.Get("k2999").Must() == 3_000)
+    Assert(*t.Get("the long key number 2997").Must() == 2_998)
 }
 
 test "NewHasher gives the fold hash" (sys: &System) {
@@ -450,10 +464,15 @@ test "KeyEq's StrEq equals str == at every length, with a difference at every po
     for n in 0..41 {
         s := try str.From(b[0..n])
         same := try str.From(c[0..n])
-        Assert(StrEq[str](s, same) && s == same)
+        Assert(StrEq[str](s, same) && s == same && StrEq[str](s, s))
         if n > 0 {
             shorter := try str.From(b[0..n - 1])
             Assert(!StrEq[str](s, shorter) && !StrEq[str](shorter, s))
+        }
+        if n < 40 {
+            // The same start, one byte longer: the length decides.
+            longer := try str.From(b[0..n + 1])
+            Assert(!StrEq[str](s, longer) && !StrEq[str](longer, s))
         }
         for p in 0..n {
             c[p] = c[p] ^ 0x01
@@ -779,4 +798,137 @@ test "a two-field key through growth, removal and iteration, fixed and keyed" (s
     var hk := HeapMap[TmPt, int].NewKeyed(a, HashKey(k0: 0x9abc, k1: 0xdef0))
     defer hk.Free(a)
     try TmPtRun(mut mk, mut hk, a)
+}
+
+// TmTextKeys is the differential script's 1,312 keys, 41 bytes apart in
+// one array of the arena: key i has i % 41 bytes ('a' + (i / 41 + 7j) % 26
+// at byte j), and in every eighth key the second half is NUL bytes, so
+// keys that differ only by trailing NULs, like "a" and "a\0", both occur,
+// at every length from 0 to 40 and on both sides of the 15-byte inline
+// bound.
+TmTextKeys(ar: &Arena): OutOfMemory!List[str] from ar {
+    b := try ar.Slice[u8](1312 * 41)
+    var keys := List[str].New(ar)
+    for i in 0..1312 {
+        n := i % 41
+        for j in 0..n {
+            b[i * 41 + j] = Trunc[u8](0x61 + (i / 41 + 7 * j) % 26)
+            if i % 8 == 0 && j >= n / 2 {
+                b[i * 41 + j] = 0
+            }
+        }
+    }
+    for i in 0..1312 {
+        try keys.Push(str.From(b[i * 41..i * 41 + i % 41]).Must())
+    }
+    return keys
+}
+
+// TmTextRun drives one seeded script of Set, Replace, Ensure and Remove
+// through t and through h, a HeapMap[str, int] over the same keys: each
+// result must agree, then every lookup, then the iteration order, entry by
+// entry. h's keys are views of keys; t keeps its own.
+TmTextRun(t: mut TextMap[int], h: mut HeapMap[str, int], a: &Alloc, keys: &List[str], seed: u64): OutOfMemory!void *keys into h {
+    var rng := seed
+    for s in 0..12_000 {
+        i := TmNext(mut rng) % keys.Len()
+        k := keys[i]
+        op := s % 6
+        if op < 2 {
+            try t.Set(a, k, s)
+            try h.Set(a, k, s)
+        } else if op == 2 {
+            r := try t.Replace(a, k, s)
+            q := try h.Replace(a, k, s)
+            Assert(r.IsSome() == q.IsSome())
+            if v := r {
+                Assert(v == q.Must())
+            }
+        } else if op == 3 {
+            v := try t.Ensure(a, k, s)
+            w := try h.Ensure(a, k, s)
+            Assert(*v == *w)
+            *v += 1
+            *w += 1
+        } else {
+            r := t.Remove(a, k)
+            q := h.Remove(&k)
+            Assert(r.IsSome() == q.IsSome())
+            if v := r {
+                Assert(v == q.Must())
+            }
+        }
+    }
+    Assert(t.Len() == h.Len())
+    for i in 0..keys.Len() {
+        k := keys[i]
+        g := t.Get(k)
+        Assert(g.IsSome() == h.Get(&k).IsSome())
+        if v := g {
+            Assert(*v == *h.Get(&k).Must())
+        }
+    }
+    var ti := t.Iter()
+    var hi := h.Iter()
+    var n := 0
+    for e := ti.Next() {
+        f := hi.Next().Must()
+        Assert(e.key == *f.key && *e.value == *f.value)
+        n += 1
+    }
+    Assert(hi.Next().IsNone() && n == t.Len())
+}
+
+test "TextMap keeps HeapMap[str, V]'s results and order with inline and copied keys, fixed and keyed" (sys: &System) {
+    a := sys.heap.Alloc()
+    keys := try TmTextKeys(sys.arena)
+    var t := TextMap[int].New(a)
+    defer t.Free(a)
+    var h := HeapMap[str, int].New(a)
+    defer h.Free(a)
+    try TmTextRun(mut t, mut h, a, &keys, 1)
+    var tk := TextMap[int].NewKeyed(a, HashKey.Of(0x0123456789abcdef, 0xfedcba9876543210))
+    defer tk.Free(a)
+    var hk := HeapMap[str, int].NewKeyed(a, HashKey.Of(0x0123456789abcdef, 0xfedcba9876543210))
+    defer hk.Free(a)
+    try TmTextRun(mut tk, mut hk, a, &keys, 2)
+}
+
+test "TextKeyOf is inline up to 15 bytes, its text the key's, and keys that differ by a trailing NUL differ" (sys: &System) {
+    b := TmDistinct()
+    et := EmptyTable[TextKey, int]()
+    ek := EmptyTableKeyed[TextKey, int](HashKey.Of(3, 4))
+    for n in 0..41 {
+        s := try str.From(b[0..n])
+        k := TextKeyOf[int](s)
+        Assert(TextKeyIsInline(&k) == (n <= 15) && TextKeyStr[int](&k) == s)
+        Assert(TextProbe(&et, s).hash == HashOf(&s) && HashOf(&k) == HashOf(&s) && TextKeyFold[int](&k) == HashOf(&s))
+        Assert(TextProbe(&ek, s).hash == HashKeyed(3, 4, &s) && TextKeyEq[int](&TextProbe(&ek, s).key, &k))
+        Assert(HashKeyed(3, 4, &k) == HashKeyed(3, 4, &s) && TmViaFold(&k) == HashOf(&s))
+        if n > 0 {
+            p := TextKeyOf[int](try str.From(b[0..n - 1]))
+            Assert(!TextKeyEq[int](&k, &p) && !TextKeyEq[int](&p, &k))
+        }
+        // The copied form a compile-time evaluation makes for every key
+        // equals and hashes as the native form, and differs from another
+        // key of either form.
+        c := TextKey(p: raw.StrData(s), n: Trunc[u64](n))
+        Assert(!TextKeyIsInline(&c) && TextKeyEq[int](&c, &k) && TextKeyEq[int](&k, &c) && TextKeyFold[int](&c) == HashOf(&s))
+        if n > 0 {
+            p := TextKeyOf[int](try str.From(b[1..n]))
+            Assert(!TextKeyEq[int](&c, &p) && !TextKeyEq[int](&p, &c))
+        }
+    }
+    var z: [3]u8 = [0x61, 0, 0]
+    k1 := TextKeyOf[int](try str.From(z[0..1]))
+    k2 := TextKeyOf[int](try str.From(z[0..2]))
+    k3 := TextKeyOf[int](try str.From(z[0..3]))
+    Assert(!TextKeyEq[int](&k1, &k2) && !TextKeyEq[int](&k2, &k3) && TextKeyEq[int](&k3, &k3))
+    a := sys.heap.Alloc()
+    var m := TextMap[int].New(a)
+    defer m.Free(a)
+    try m.Set(a, try str.From(z[0..1]), 1)
+    try m.Set(a, try str.From(z[0..2]), 2)
+    try m.Set(a, try str.From(z[0..3]), 3)
+    Assert(m.Len() == 3 && *m.Get("a").Must() == 1 && *m.Get(try str.From(z[0..3])).Must() == 3)
 }

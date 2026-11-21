@@ -136,7 +136,7 @@ func TestStrEqualRun(t *testing.T) {
 					decls = "declare i1 @mk.main.StrEq(ptr, ptr)\ndeclare i1 @mk.main.StrNe(ptr, ptr)\ndeclare i1 @mk.main.EqGet(ptr)\n"
 				}
 				e := newTestEnv()
-				ll := emit(t, e, unitOf(e, strEqBodies(e)), target, types.Dev)
+				ll := emit(t, e, cCallable(unitOf(e, strEqBodies(e))), target, types.Dev) // the harness calls them
 				dir := t.TempDir()
 				osIR, kernel := harnessOS(target)
 				h := osIR + harnessRT + data.String() + decls + `

@@ -123,7 +123,8 @@ func newPackGen(u *Unit, p int, env Env, cfg *Config, m *llvm.Module) *packGen {
 
 // funcSigOf is the lowered signature of Funcs[fi]: from its instance body's
 // locals (concrete), or for a bodiless extern or intrinsic from its declared
-// signature, which is never generic.
+// signature, which is never generic; under abi.LowerInternal where
+// internalABI allows, else the C ABI.
 func (g *packGen) funcSigOf(fi int) *lsig {
 	if s, ok := g.fnsigs[fi]; ok {
 		return s
@@ -146,7 +147,13 @@ func (g *packGen) funcSigOf(fi int) *lsig {
 		result = sig.ReturnType(g.tt)
 		fixed, variadic = len(params), sig.Variadic
 	}
-	s := g.withImmutParams(fi, g.lowerSig(params, fixed, variadic, result)) // immutarg.go
+	var s *lsig
+	if g.internalABI(fi) { // sig.go
+		s = g.lowerSigInternal(params, result)
+	} else {
+		s = g.lowerSig(params, fixed, variadic, result)
+	}
+	s = g.withImmutParams(fi, s) // immutarg.go
 	g.fnsigs[fi] = s
 	return s
 }

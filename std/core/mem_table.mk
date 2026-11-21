@@ -2,7 +2,9 @@
 // and reaches slot fields through raw pointers; this file holds that raw
 // memory access so the table algorithm needs no unsafe block.
 //
-// What: CtrlAt, CtrlPut, GroupAt, KeyAt, ValueAt, NewCtrl and Discard.
+// What: CtrlAt, CtrlPut, GroupAt, KeyAt, ValueAt, NewCtrl and Discard; and
+// TextKeyInlineOf, TextKeyWord0 and TextKeyInlineStr, the raw access of a
+// TextMap's inline keys (coll_heap.mk).
 //
 // How: the control array has cap + 8 bytes, the first 8 mirrored at the end,
 // and CtrlPut writes both copies, so a group read at any slot never wraps.
@@ -67,5 +69,32 @@ NewCtrl(a: &Alloc, cap: int): *u8 {
 Discard[T](x: T) {
     unsafe "the caller checked raw.IsLinear" {
         raw.Forget(x)
+    }
+}
+
+// TextKeyInlineOf is the inline TextKey whose first word is w0 and whose n
+// is w1: w0 is written over p's bytes, so p holds no pointer. Natively
+// only (TextKeyOf). Generic over the map's value type only, as TextKeyOf,
+// so the three are inlined in the caller's pack.
+TextKeyInlineOf[V](w0: u64, w1: u64): TextKey {
+    var k := TextKey(p: raw.Null[u8](), n: w1)
+    unsafe "an inline key: its first 8 bytes are w0's, never read as a pointer" {
+        raw.Write(raw.PtrCast[TextKey, u64](raw.OfMut(mut k)), w0)
+    }
+    return k
+}
+
+// TextKeyWord0 is the first word of the inline key at k, its bytes 0 to 7.
+TextKeyWord0[K](k: &TextKey): u64 {
+    unsafe "an inline key: its first 8 bytes are a word, not a pointer" {
+        return raw.Read(raw.PtrCast[TextKey, u64](raw.Of(k)))
+    }
+}
+
+// TextKeyInlineStr is the inline key at k as a view of its n bytes, the
+// first bytes of *k, valid while *k is.
+TextKeyInlineStr[K](k: &TextKey, n: int): str {
+    unsafe "an inline key: its n bytes, valid UTF-8 copied from a str, are the first bytes of *k" {
+        return StrOf(raw.PtrCast[TextKey, u8](raw.Of(k)), n)
     }
 }

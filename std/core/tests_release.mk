@@ -87,7 +87,7 @@ test "HeapMap.Set and Ensure on present keys keep one entry" (sys: &System) {
     m.Free(a)
 }
 
-test "TextMap.Set and Replace copy each new key once and free them all" (sys: &System) {
+test "TextMap.Set and Replace keep or copy each new key once and free them all" (sys: &System) {
     a := sys.heap.Alloc()
     var m := TextMap[TrTok].New(a)
     keys := ["", "a", "bb", "ccc", "a much longer key than the others"]

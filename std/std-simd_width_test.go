@@ -61,7 +61,8 @@ var sdAvx2 = []sdForce{
 
 // sdCoreFree forces std.core's freestanding forks to their freestanding
 // branch on any target: ValidUtf8,
-// IndexByteIn and BytesEqual run std.core's own SWAR forms and never call
+// IndexByteIn and BytesEqual run std.core's own SWAR forms, FindFrom runs
+// Two-Way alone, and none calls
 // std.simd, as on x86_64-freestanding. (The fuel guards whose hosted-only
 // forms it also skipped left std.core for std/core_guards_test.go's
 // harness program, batch 4's add-on review R4B-1, so it forces no test
@@ -73,6 +74,7 @@ var (
 		{"core/core_iter.mk", "Target.os == Os.Freestanding", "true", 1},
 		{"core/core_str.mk", "Target.os != Os.Freestanding", "false", 1},
 		{"core/core_str.mk", "Target.os == Os.Freestanding", "true", 1},
+		{"core/core_find.mk", "Target.os != Os.Freestanding", "false", 1},
 	}
 	sdCoreHosted = []sdForce{
 		{"core/core_utf8.mk", "Target.os != Os.Freestanding", "true", 1},
@@ -80,6 +82,7 @@ var (
 		{"core/core_iter.mk", "Target.os == Os.Freestanding", "false", 1},
 		{"core/core_str.mk", "Target.os != Os.Freestanding", "true", 1},
 		{"core/core_str.mk", "Target.os == Os.Freestanding", "false", 1},
+		{"core/core_find.mk", "Target.os != Os.Freestanding", "true", 1},
 	}
 )
 

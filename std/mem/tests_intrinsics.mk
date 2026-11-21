@@ -1,9 +1,9 @@
 // Why: intrinsics are lowered by codegen and run by the evaluator; both
 // paths must agree.
 // What: tests of std.mem's OffsetOf and Prefetch (intrinsics.mk), std.raw's
-// AtomicCopy, AtomicFill and FnFromAddr, and std.atomic's Pause. std.runtime's
-// Cycles is tested in std/runtime/tests_cycles.mk, since std.mem builds on
-// freestanding and std.runtime does not.
+// AtomicCopy, AtomicFill, FnFromAddr and Select, and std.atomic's Pause.
+// std.runtime's Cycles is tested in std/runtime/tests_cycles.mk, since
+// std.mem builds on freestanding and std.runtime does not.
 // How: run by `mk test --std=std.mem`: each runs natively, and the
 // consts run the same functions in the evaluator
 // (internal/eval/intrinsic_machine.go).
@@ -115,4 +115,41 @@ test "FnFromAddr calls a function at an address" {
         g = raw.FnFromAddr[fn(): int](a)
     }
     Assert(g() == 7)
+}
+
+struct SelRec {
+    a: u8
+    b: u64
+    c: u16
+}
+
+// Selects folds raw.Select over scalars, a pointer and a record, for both
+// conditions; SelectsAt is the same at compile time.
+Selects(): u64 {
+    var acc: u64 = 0
+    x: u64 = 5
+    y: u64 = 9
+    for i in 0..4 {
+        c := i % 2 == 0
+        acc = acc *% 31 +% raw.Select(c, x, y)
+        acc = acc *% 31 +% Cast[u64](raw.Select(c, -3, 40) + 3)
+        bv: u64 = if raw.Select(c, true, false) { 1 } else { 2 }
+        acc = acc *% 31 +% bv
+        r := raw.Select(c, SelRec(a: 1, b: 2, c: 3), SelRec(a: 4, b: 5, c: 6))
+        acc = acc *% 31 +% Cast[u64](r.a) + r.b + Cast[u64](r.c)
+        p := raw.Select(c, raw.Of(&x), raw.Of(&y))
+        pv: u64 = if raw.Same(p, raw.Of(&x)) { 7 } else { 8 }
+        acc = acc *% 31 +% pv
+        acc = acc *% 31 +% Cast[u64](raw.Select(c, 1.5, 2.5) * 2.0)
+    }
+    return acc
+}
+
+const SelectsAt: u64 = Selects()
+
+test "Select picks a or b, at run time and at compile time" {
+    Assert(raw.Select(true, 1, 2) == 1 && raw.Select(false, 1, 2) == 2)
+    r := raw.Select(false, SelRec(a: 1, b: 2, c: 3), SelRec(a: 4, b: 5, c: 6))
+    Assert(r.a == 4 && r.b == 5 && r.c == 6)
+    Assert(Selects() == SelectsAt)
 }

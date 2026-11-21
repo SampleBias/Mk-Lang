@@ -837,7 +837,7 @@ See also: [errors](reference.md#9-errors), [`match` on a result](reference.md#ma
 
 ## Memory
 
-Mk has no garbage collector and no hidden allocation. Memory comes from an allocator you pass in. The compiler checks that no reference outlives what it points at, and that nothing is released twice or forgotten. Most code needs no annotations for this. [The memory model](memory.md) has every rule.
+Mk has no garbage collector and no hidden allocation. Memory comes from an allocator you pass in. The one exception is `SortStable`, which takes scratch memory from the process heap and frees it before it returns ([sorting](std/core.md#sorting-and-searching)). The compiler checks that no reference outlives what it points at, and that nothing is released twice or forgotten. Most code needs no annotations for this. [The memory model](memory.md) has every rule.
 
 ### Arenas
 
@@ -1323,7 +1323,7 @@ export Main(sys: &System): WriteError!void {
 
 To run it, list the module in `pkg.mk`: `unsafe_modules: ["src"]`.
 
-Every Mk function uses the platform's C calling convention, so C can call it and it can call C:
+An `extern` function, and any Mk function used as a value, uses the platform's C calling convention, so C can call it and it can call C:
 
 ```mk
 // verdict: parse

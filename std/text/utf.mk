@@ -12,15 +12,18 @@
 // Both passes of both take 16 bytes or 8 to 16 units a vector where the text
 // allows (std.simd at the 16-lane baseline; FromUtf16's write packs the 1-,
 // 2- and 3-byte forms of four units with one pshufb, Utf16ToUtf8Vec;
-// ToUtf16's write decodes runs of eight two-byte or four three-byte scalars a
-// step, Utf8Two16 and Utf8Three16; ToUtf16's sizing is simd.Utf16Len, at the
-// widest width Cpu() reports), and the scalar loops finish the rest. On
-// x86_64-freestanding the vector steps are not compiled (each sits under a
-// compile-time Target.os test, as std.simd's byte routines do), so a
-// general-regs-only bin that calls ToUtf16 or FromUtf16 meets no E1108 here.
+// ToUtf16's write decodes runs of eight two-byte scalars a step, Utf8Two16,
+// and any other mix of one- to three-byte scalars up to twelve bytes a step
+// through one table lookup and one pshufb, std.simd.kernel's Utf8To16Step;
+// ToUtf16's sizing is simd.Utf16Len, at the widest width Cpu() reports),
+// and the scalar loops finish the rest. On x86_64-freestanding the vector
+// steps are not compiled (each sits under a compile-time Target.os test, as
+// std.simd's byte routines do), so a general-regs-only bin that calls
+// ToUtf16 or FromUtf16 meets no E1108 here.
 
 import std.raw
 import std.simd
+import std.simd.kernel
 
 // Decode is the scalar at b[i] and its length in bytes; b is valid UTF-8
 // and i the start of a scalar.
@@ -156,21 +159,57 @@ export ToUtf16(a: &Arena, s: str): OutOfMemory![]u16 from a {
     var o := 0
     for i < n {
         x := u32(b[i])
-        if x < 0x80 {
-            // The sixteen- and eight-byte probes run only from an ASCII
-            // byte, so mixed text pays them once per ASCII run, not once
-            // per scalar. Sixteen ASCII bytes widen to sixteen units in two
-            // vectors (simdutf's ASCII fast path).
-            if Target.os != Os.Freestanding && i + 16 <= n {
-                v := simd.Vec[u8, 16].FromSlice(b, i)
-                if (v >= simd.Vec[u8, 16].Splat(0x80)).Bits() == 0 {
-                    v.WidenLo[u16, 8]().CopyTo(out, o)
-                    v.WidenHi[u16, 8]().CopyTo(out, o + 8)
-                    o += 16
-                    i += 16
+        if Target.os != Os.Freestanding && i + 16 <= n {
+            v := simd.Vec[u8, 16].FromSlice(b, i)
+            if (v >= simd.Vec[u8, 16].Splat(0x80)).Bits() == 0 {
+                // Sixteen ASCII bytes widen to sixteen units in two
+                // vectors (simdutf's ASCII fast path).
+                v.WidenLo[u16, 8]().CopyTo(out, o)
+                v.WidenHi[u16, 8]().CopyTo(out, o + 8)
+                o += 16
+                i += 16
+                continue
+            }
+            if o + 8 <= out.Len() {
+                // Sixteen bytes that are up to eight two-byte scalars
+                // (Greek, Cyrillic, Hebrew, Arabic text) decode in one
+                // step, entered only when the next two scalars are two-byte
+                // too. Any other mix of one- to three-byte scalars decodes
+                // up to twelve bytes a step through kernel.Utf8To16Step.
+                if x & 0xE0 == 0xC0 && b[i + 2] & 0xE0 == 0xC0 && b[i + 4] & 0xE0 == 0xC0 {
+                    if k := Utf8Two16(out, o, b, i) {
+                        o += k
+                        i += 2 * k
+                        continue
+                    }
+                }
+                st := kernel.Utf8To16Step(v)
+                if st.read > 0 {
+                    st.units.CopyTo(out, o)
+                    o += st.wrote
+                    i += st.read
+                    continue
+                }
+                // A four-byte scalar first: it and the four-byte scalars
+                // right after it go as surrogate pairs here, so a run of
+                // them (emoji) pays one failed step, not one each. Any
+                // other byte (only in invalid UTF-8, through raw.Str)
+                // falls to the scalar path below.
+                if x >= 0xF0 {
+                    for i < n && b[i] >= 0xF0 {
+                        q := b[i..i + 4]
+                        c := (((u32(q[0]) & 0x07) << 18) | ((u32(q[1]) & 0x3F) << 12) | ((u32(q[2]) & 0x3F) << 6) | (u32(q[3]) & 0x3F)) - 0x10000
+                        var d := mut out[o..o + 2]
+                        d[0] = Trunc[u16](0xD800 + (c >> 10))
+                        d[1] = Trunc[u16](0xDC00 + (c & 0x3FF))
+                        o += 2
+                        i += 4
+                    }
                     continue
                 }
             }
+        }
+        if x < 0x80 {
             if i + 8 <= n {
                 w := Word(b, i)
                 if w & HighBits == 0 {
@@ -190,35 +229,12 @@ export ToUtf16(a: &Arena, s: str): OutOfMemory![]u16 from a {
             continue
         }
         if x < 0xE0 {
-            // Sixteen bytes that are up to eight two-byte scalars (Greek,
-            // Cyrillic, Hebrew, Arabic text) decode in one step, entered
-            // only when the next two scalars are two-byte too, so a lone
-            // one in mixed text pays two byte tests, not a vector step
-            // that would decode it alone (taking every entry costs mixed
-            // text more instructions).
-            if i + 16 <= n && b[i + 2] & 0xE0 == 0xC0 && b[i + 4] & 0xE0 == 0xC0 {
-                if k := Utf8Two16(out, o, b, i) {
-                    o += k
-                    i += 2 * k
-                    continue
-                }
-            }
             out[o] = Trunc[u16](((x & 0x1F) << 6) | (u32(b[i + 1]) & 0x3F))
             o += 1
             i += 2
             continue
         }
         if x < 0xF0 {
-            // Twelve bytes that are up to four three-byte scalars (CJK,
-            // Indic text) decode in one step, from one sixteen-byte load,
-            // entered only when the next two scalars are three-byte too.
-            if i + 16 <= n && b[i + 3] & 0xF0 == 0xE0 && b[i + 6] & 0xF0 == 0xE0 {
-                if k := Utf8Three16(out, o, b, i) {
-                    o += k
-                    i += 3 * k
-                    continue
-                }
-            }
             q := b[i..i + 3]
             out[o] = Trunc[u16](((x & 0x0F) << 12) | ((u32(q[1]) & 0x3F) << 6) | (u32(q[2]) & 0x3F))
             o += 1
@@ -373,30 +389,6 @@ Utf8Two16(out: mut []u16, o: int, b: []u8, i: int): ?int {
     }
     u := ((w & simd.Vec[u16, 8].Splat(0x1F)) << 6) | ((w >> 8) & simd.Vec[u16, 8].Splat(0x3F))
     u.CopyTo(out, o)
-    return some(k)
-}
-
-// Utf8Three16 is the three-byte step: b[i] leads a three-byte scalar and
-// i + 16 <= b.Len(). Bytes 0 to 11 are spread to four u32 lanes, one
-// scalar's three bytes each (one fixed pshufb), tested for (1110xxxx,
-// 10xxxxxx, 10xxxxxx), and decoded with masks and shifts; the four units
-// are stored when out has room, as Utf8Two16 does. A str holds no
-// surrogate, so every unit is the scalar itself. none or some(k).
-Utf8Three16(out: mut []u16, o: int, b: []u8, i: int): ?int {
-    // The vector step is not compiled on freestanding (no E1108).
-    if Target.os == Os.Freestanding || o + 4 > out.Len() {
-        return none
-    }
-    v := simd.Vec[u8, 16].FromSlice(b, i)
-    g := v.Shuffle(simd.Vec[u8, 16].Zero(), [0, 1, 2, 16, 3, 4, 5, 16, 6, 7, 8, 16, 9, 10, 11, 16]).Reinterpret[u32, 4]()
-    ok := ((g & simd.Vec[u32, 4].Splat(0x00C0C0F0)) == simd.Vec[u32, 4].Splat(0x008080E0)).Bits()
-    k := raw.Ctz64(~ok)
-    if k == 0 {
-        return none
-    }
-    x3f := simd.Vec[u32, 4].Splat(0x3F)
-    u := ((g & simd.Vec[u32, 4].Splat(0x0F)) << 12) | (((g >> 8) & x3f) << 6) | ((g >> 16) & x3f)
-    u.Trunc[u16]().CopyTo(out, o)
     return some(k)
 }
 

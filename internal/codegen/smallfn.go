@@ -15,7 +15,11 @@
 //     in the unit is in another pack is marked when soleCallAttr's
 //     conditions hold between it and that caller (crossEligible). One site
 //     duplicates no code, so this mark has no size bound beyond
-//     soleCallOps.
+//     soleCallOps. Its loop condition reads the loops that end up in the
+//     function's body (smallSet.loops), not its effect's: a looping
+//     callee of a function that is not thin stays a call there, so a
+//     dispatcher such as std.hash.Sip13 (SipShort inlined, SipKeyed's loop
+//     a call) may go into a caller's loop.
 //
 // Why the definition: ThinLTO imports a callee into another pack's module
 // only while its summary's instruction count stays under
@@ -116,6 +120,14 @@ type smallSet struct {
 	fx    []soleEffect
 	small []bool
 	cross []bool
+	// loops is set when a function's body holds a loop once the marks
+	// inline what they may into it: its own, or, in a thin function (no
+	// loop, at most thinCallerBlocks blocks), one of a callee its effect
+	// counts. Both sole-call rules inline a looping callee only into a
+	// thin caller, so a looping callee of any other function stays a call.
+	// fx.loops counts that callee too. crossEligible reads this, and
+	// soleEffectOf for a marked callee (smallLoops).
+	loops []bool
 	// calls is each direct call site's callee, by the index emission calls
 	// (callIndex), one entry per site; callsTo counts them per callee and
 	// site is a callee's last caller.
@@ -203,6 +215,16 @@ func (g *packGen) smallFx(fi int) soleEffect {
 	return s.fx[fi]
 }
 
+// smallLoops is whether a loop ends up in Funcs[fi]'s body once the marks
+// inline what they may (smallSet.loops; false outside release).
+func (g *packGen) smallLoops(fi int) bool {
+	if !g.cfg.Profile.Optimized() || fi < 0 {
+		return false
+	}
+	s := g.smallSetOf()
+	return fi < len(s.loops) && s.loops[fi]
+}
+
 // soleAnyIn reports whether Funcs[j] has one direct call site in the unit
 // (by s's counts) and none of the uses that keep the sole-call rules away
 // (AddrTaken, Spawned, naked, wrappedMain, or a function codegen calls by
@@ -271,8 +293,7 @@ func (g *packGen) crossEligible(s *smallSet, j, c int) bool {
 	if !featureSubset(g.featuresOf(j), g.featuresOf(c)) {
 		return false
 	}
-	fx := s.fx[j]
-	if fx.ops > soleCallOps || fx.loops && (len(cf.Body.Loops) > 0 || len(cf.Body.Blocks) > thinCallerBlocks) {
+	if s.fx[j].ops > soleCallOps || s.loops[j] && (len(cf.Body.Loops) > 0 || len(cf.Body.Blocks) > thinCallerBlocks) {
 		return false
 	}
 	return !(g.u.soleCallsOf().outside[cf.Item] && len(g.cpuOf(c)) == 0)
@@ -323,6 +344,7 @@ func (g *packGen) smallSetTry() *smallSet {
 		s.fx = make([]soleEffect, n)
 		s.small = make([]bool, n)
 		s.cross = make([]bool, n)
+		s.loops = make([]bool, n)
 		s.calls = make([][]int, n)
 		s.callsTo = make([]int32, n)
 		s.site = make([]int, n)
@@ -393,15 +415,19 @@ func (g *packGen) smallSetTry() *smallSet {
 			if cyclic {
 				for _, w := range comp {
 					s.fx[w] = soleEffect{ops: soleHuge, loops: true}
+					s.loops[w] = true
 				}
 				return
 			}
 			b := u.Funcs[v].Body
 			fx := soleEffect{ops: bodyOps(b), loops: len(b.Loops) > 0}
+			thin := len(b.Loops) == 0 && len(b.Blocks) <= thinCallerBlocks
+			s.loops[v] = len(b.Loops) > 0
 			for _, w := range s.calls[v] {
 				if s.small[w] || g.soleAnyIn(s, w) {
 					fx.ops = min(fx.ops+s.fx[w].ops, soleHuge)
 					fx.loops = fx.loops || s.fx[w].loops
+					s.loops[v] = s.loops[v] || thin && s.loops[w]
 				}
 			}
 			s.fx[v] = fx

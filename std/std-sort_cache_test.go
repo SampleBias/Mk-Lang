@@ -1,8 +1,9 @@
-// Why: SortStable's stack cache holds values of any T in a [512]u64 local,
-// read and written through a raw pointer cast, sound only without TBAA metadata.
+// Why: SortStable's stack scratch, and its in-place sort's stack cache, hold
+// values of any T in a [512]u64 local, read and written through a raw
+// pointer cast, sound only without TBAA metadata.
 // What: TestSortCacheNoTBAA and TestSortCacheSizesMatchModel, with the extra
 // element types sortCacheSizesExtra and the cases sortCacheCase.
-// How: reads the IR of a sort through the cache for !tbaa, and sorts each cache
+// How: reads the IR of a sort through both for !tbaa, and sorts each cache
 // size against slices.SortStableFunc and the model's count of less calls.
 
 package std
@@ -44,17 +45,17 @@ export Main(sys: &System): OutOfMemory|WriteError!void {
 }
 `
 
-// TestSortCacheNoTBAA pins what SortStable's stack cache (core_sort.mk,
-// BlkCacheCap) rests on: the cache is a [512]u64 local that holds values of
-// any T aligned to at most 8, written and read through a raw pointer cast,
-// which is sound only while the compiler emits no type-based alias
-// metadata; with !tbaa on its loads and stores LLVM could take a store of a
-// T and a later load of a u64 field to the same bytes as unordered. The
-// test builds a program whose SortStable moves structs of mixed fields (an
-// int, a u8, a str and a u32) through the cache, with --emit-ll, in
-// dev and release, and fails on any tbaa metadata in the IR codegen wrote;
-// it also checks the IR holds the cache's merge, so it read the code that
-// needs the rule.
+// TestSortCacheNoTBAA pins what SortStable's stack scratch (core_drift.mk,
+// DriftStackCap) and its in-place sort's stack cache (core_sort.mk,
+// BlkCacheCap) rest on: each is a [512]u64 local that holds values of any T
+// aligned to at most 8, written and read through a raw pointer cast, which
+// is sound only while the compiler emits no type-based alias metadata; with
+// !tbaa on its loads and stores LLVM could take a store of a T and a later
+// load of a u64 field to the same bytes as unordered. The test builds a
+// program whose SortStable moves structs of mixed fields (an int, a u8, a
+// str and a u32), with --emit-ll, in dev and release, and fails on any tbaa
+// metadata in the IR codegen wrote; it also checks the IR holds DriftSort
+// and the cache's merge, so it read the code that needs the rule.
 func TestSortCacheNoTBAA(t *testing.T) {
 	t.Parallel()
 	for _, flags := range [][]string{nil, {"--release"}} {
@@ -73,7 +74,7 @@ func TestSortCacheNoTBAA(t *testing.T) {
 			}
 			t.Fatalf("mk build %v: exit %d\n%s", flags, status, out)
 		}
-		files, cacheMerge := 0, false
+		files, cacheMerge, drift := 0, false, false
 		err := filepath.WalkDir(ll, func(p string, d fs.DirEntry, err error) error {
 			if err != nil || d.IsDir() || !strings.HasSuffix(p, ".ll") {
 				return err
@@ -87,16 +88,17 @@ func TestSortCacheNoTBAA(t *testing.T) {
 			if i := strings.Index(text, "tbaa"); i >= 0 {
 				line := text[strings.LastIndex(text[:i], "\n")+1:]
 				line, _, _ = strings.Cut(line, "\n")
-				t.Errorf("%v: %s holds type-based alias metadata, which SortStable's stack cache cannot have: %s", flags, filepath.Base(p), line)
+				t.Errorf("%v: %s holds type-based alias metadata, which SortStable's stack scratch and cache cannot have: %s", flags, filepath.Base(p), line)
 			}
 			cacheMerge = cacheMerge || strings.Contains(text, "BlkMergeExternal")
+			drift = drift || strings.Contains(text, "DriftSort")
 			return nil
 		})
 		if err != nil {
 			t.Fatal(err)
 		}
-		if files == 0 || !cacheMerge {
-			t.Fatalf("%v: %d IR files, cache merge seen %v: the test no longer reads the cache's code", flags, files, cacheMerge)
+		if files == 0 || !cacheMerge || !drift {
+			t.Fatalf("%v: %d IR files, cache merge seen %v, DriftSort seen %v: the test no longer reads the code", flags, files, cacheMerge, drift)
 		}
 	}
 }
@@ -104,8 +106,9 @@ func TestSortCacheNoTBAA(t *testing.T) {
 // sortCacheSizesExtra adds, to blockMergeHead (std-coll_blockmerge_test.go),
 // element types that get each kind of stack cache: 8 bytes (512 slots), 40
 // (102), 16 aligned to 16 (none), 4,096 (1) and 4,104 (none); RunW sorts the
-// pattern's keys as type w stably, counting the calls of less, and prints
-// the digest of the ids in order and the count.
+// pattern's keys as type w stably with SortStable's in-place sort
+// (sortfix.InPlace), counting the calls of less, and prints the digest of
+// the ids in order and the count.
 const sortCacheSizesExtra = `
 struct W8 {
     k: i32
@@ -152,7 +155,7 @@ RunW(out: mut Writer, a: &Alloc, w: int, pat: int, n: int): OutOfMemory|WriteErr
         for i in 0..n {
             try l.Push(a, W8(k: Trunc[i32](keys[i].k), id: Trunc[i32](i)))
         }
-        l.SortStable(fn(x: &W8, y: &W8): bool {
+        sortfix.InPlace(l.ItemsMut(), fn(x: &W8, y: &W8): bool {
             c.Store(c.Load() + 1)
             return x.k < y.k
         })
@@ -165,7 +168,7 @@ RunW(out: mut Writer, a: &Alloc, w: int, pat: int, n: int): OutOfMemory|WriteErr
         for i in 0..n {
             try l.Push(a, W40(k: keys[i].k, id: i, a: i, b: 0, c: 0))
         }
-        l.SortStable(fn(x: &W40, y: &W40): bool {
+        sortfix.InPlace(l.ItemsMut(), fn(x: &W40, y: &W40): bool {
             c.Store(c.Load() + 1)
             return x.k < y.k
         })
@@ -178,7 +181,7 @@ RunW(out: mut Writer, a: &Alloc, w: int, pat: int, n: int): OutOfMemory|WriteErr
         for i in 0..n {
             try l.Push(a, WA16(k: keys[i].k, id: i))
         }
-        l.SortStable(fn(x: &WA16, y: &WA16): bool {
+        sortfix.InPlace(l.ItemsMut(), fn(x: &WA16, y: &WA16): bool {
             c.Store(c.Load() + 1)
             return x.k < y.k
         })
@@ -191,7 +194,7 @@ RunW(out: mut Writer, a: &Alloc, w: int, pat: int, n: int): OutOfMemory|WriteErr
         for i in 0..n {
             try l.Push(a, W4096(k: keys[i].k, id: i, pad: [0; 510]))
         }
-        l.SortStable(fn(x: &W4096, y: &W4096): bool {
+        sortfix.InPlace(l.ItemsMut(), fn(x: &W4096, y: &W4096): bool {
             c.Store(c.Load() + 1)
             return x.k < y.k
         })
@@ -204,7 +207,7 @@ RunW(out: mut Writer, a: &Alloc, w: int, pat: int, n: int): OutOfMemory|WriteErr
         for i in 0..n {
             try l.Push(a, WBig(k: keys[i].k, id: i, pad: [0; 511]))
         }
-        l.SortStable(fn(x: &WBig, y: &WBig): bool {
+        sortfix.InPlace(l.ItemsMut(), fn(x: &WBig, y: &WBig): bool {
             c.Store(c.Load() + 1)
             return x.k < y.k
         })
@@ -239,7 +242,7 @@ func sortCacheCases() []sortCacheCase {
 	return cs
 }
 
-// TestSortCacheSizesMatchModel: SortStable of elements of 8, 40, 16
+// TestSortCacheSizesMatchModel: SortStable's in-place sort of elements of 8, 40, 16
 // (aligned to 16), 4,096 and 4,104 bytes, every pattern of blkPattern at
 // every n to 70 and the block and buffer boundaries to 4,096 (to 600 for
 // the 4 KiB elements), gives slices.SortStableFunc's order and the model's
@@ -269,6 +272,6 @@ func TestSortCacheSizesMatchModel(t *testing.T) {
 	fmt.Fprintf(&src, "    for i in 0..%d {\n        try RunW(mut out, a, Cases[3 * i], Cases[3 * i + 1], Cases[3 * i + 2])\n    }\n}\n", len(cs))
 	t.Logf("%d cases", len(cs))
 	for _, flags := range [][]string{nil, {"--release"}} {
-		diffLines(t, collExec(t, collBuild(t, src.String(), flags...)), want.String())
+		diffLines(t, collExec(t, collBuildWith(t, sortFix, src.String(), flags...)), want.String())
 	}
 }

@@ -2,8 +2,8 @@
 // what std/sys/linux exports, so std checks and builds for the target until
 // the Nutshell backend replaces this directory.
 //
-// What: Reserve, Commit, CommitStack, Decommit, Discard, Release, GuardPage
-// and GuardStack.
+// What: Reserve, Commit, CommitStack, Decommit, Discard, Release, GuardPage,
+// GuardStack and AddressLimited.
 //
 // How: no memory can be reserved or committed.
 
@@ -35,6 +35,13 @@ export Decommit(p: *u8, size: int) {
 /// Discard has std/sys/linux's contract; this placeholder does nothing.
 /// O(1); allocates nothing.
 export Discard(p: *u8, size: int) {
+}
+
+/// AddressLimited has std/sys/linux's contract; this placeholder returns
+/// `false`.
+/// O(1); allocates nothing.
+export AddressLimited(): bool {
+    return false
 }
 
 /// Release has std/sys/linux's contract; this placeholder does nothing.

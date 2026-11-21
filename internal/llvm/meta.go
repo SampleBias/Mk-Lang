@@ -324,6 +324,11 @@ func (mt *Meta) NonNull() Attach { return Attach{"nonnull", mt.Empty()} }
 // NoUndef is the attachment !noundef !{}.
 func (mt *Meta) NoUndef() Attach { return Attach{"noundef", mt.Empty()} }
 
+// Unpredictable is the attachment !unpredictable !{} of a select or a
+// branch: its condition follows no pattern, so the backend keeps a select a
+// conditional move (x86's cmov converter skips it).
+func (mt *Meta) Unpredictable() Attach { return Attach{"unpredictable", mt.Empty()} }
+
 // Align is the attachment !align !{i64 n} for a load of a pointer.
 func (mt *Meta) Align(n uint64) Attach {
 	b := append(mt.sc[:0], "!{i64 "...)

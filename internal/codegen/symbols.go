@@ -131,6 +131,11 @@ func (g *packGen) fnRef(item types.ItemID, args []types.GenericArg, fi int) llvm
 		// thunk, not the body (exports.go).
 		return g.m.FuncRef(th)
 	}
+	if g.internalABI(callee) {
+		// A fn value is a C function pointer: mono marks its function
+		// AddrTaken, which keeps the C ABI.
+		source.ICEf(source.Span{}, "codegen: %s is a value but has the internal ABI (not AddrTaken)", g.u.Funcs[callee].Symbol)
+	}
 	return g.m.FuncRef(g.funcDecl(callee))
 }
 

@@ -89,7 +89,7 @@ func TestAttributes(t *testing.T) {
 	// Win64: an aggregate over 8 bytes is a pointer to a fresh copy, with
 	// the copy's facts and none of its fields'; a non-var parameter
 	// is also readonly and captures(none) (immutarg_test.go).
-	win := emit(t, e, unitOf(e, bodies), types.X86_64Windows, types.Dev)
+	win := emit(t, e, cCallable(unitOf(e, bodies)), types.X86_64Windows, types.Dev) // the C ABI
 	if _, got := paramAttrs(t, win, "mk.main.PBig"); len(got) != 1 || got[0] != "ptr noundef nonnull noalias align 8 dereferenceable(32) readonly captures(none)" {
 		t.Errorf("Win64 Big: %q", got)
 	}

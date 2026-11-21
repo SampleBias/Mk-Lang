@@ -238,11 +238,11 @@ First(): int {
 
 ### Sorting and searching
 
-No sort or search allocates, except `SortStableIn`, from the allocator it is given.
+`Sort` and `Search` allocate nothing. `SortStable` takes scratch memory, from the stack or the process heap, and `SortStableIn` from the allocator it is given; both free it before they return.
 
 - `Sort(less)` is unstable, O(n log n) in the worst case, and gives the same result on every run.
-- `SortStable(less)` sorts in place, keeps equal elements in their order, and makes O(n log n) calls of `less` and moves.
-- `SortStableIn(a, less)` sorts as `SortStable` does, but merges through `Len() / 2` elements of scratch from `a`, freed before it returns. `OutOfMemory` comes before any element moves, so the slice is unchanged. Below 32 elements, or for a zero-size `T`, it allocates nothing.
+- `SortStable(less)` keeps equal elements in their order, and makes O(n log n) calls of `less` and moves. Past 20 elements it merges through scratch of `Len() / 2` elements or more: the whole slice while that is at most 8,000,000 bytes. Scratch that fits in 4,096 bytes, for a `T` aligned to at most 8, is on the stack, and other scratch comes from the process heap. Through scratch, input that is already sorted or strictly descending costs O(n). When its scratch is larger than the stack's and the heap is out of memory, at compile time or in a freestanding program, it sorts in place instead, with the same result. It is Rust's driftsort.
+- `SortStableIn(a, less)` sorts as `SortStable` does, with `Len() / 2` elements of scratch from `a`. `OutOfMemory` comes before any element moves, so the slice is unchanged. Below 32 elements, or for a zero-size `T`, it allocates nothing.
 - `Search(&key, less)` takes a slice where `less(element, key)` holds for a prefix and not after it. It returns that prefix's length: the first index whose element is not less than the key, or `Len()` when there is none. That is where the key goes to keep the slice sorted. It is O(log n). On any other slice it returns some index from 0 to `Len()`.
 - A `less` that needs context is a function literal that reads it, so there are no `With` forms ([Sort with a comparison that reads locals](../cookbook.md#sort-with-a-comparison-that-reads-locals)).
 - Sorting a slice that holds a float NaN leaves a permutation of its elements in an unspecified order, with no panic.
@@ -277,7 +277,7 @@ A `for` loop takes an iterator by value, never through `&` or `mut` (E0301; [ite
 
 ## Maps and sets
 
-`Map[K, V]` and `Set[T]` live in an arena. `HeapMap[K, V]` is the linear heap form of `Map`, and `TextMap[V]` a heap map keyed by text that copies each new key into its allocator. Keys need `Hash + Eq`.
+`Map[K, V]` and `Set[T]` live in an arena. `HeapMap[K, V]` is the linear heap form of `Map`, and `TextMap[V]` a heap map keyed by text that keeps a new key of up to 15 bytes in its table and copies a longer one into its allocator. Keys need `Hash + Eq`.
 
 | Task | Use |
 |---|---|
@@ -293,7 +293,7 @@ A `for` loop takes an iterator by value, never through `&` or `mut` (E0301; [ite
 - `Ensure(k, v)` returns the value for `k` as `mut V`, inserting `v` first if the key is absent.
 - `Set.Add(x)` returns `false` when `x` was already a member.
 - `Remove` drops the stored key. In an arena map its memory stays in the arena, and a grown table leaves the old one there.
-- On a `HeapMap` or `TextMap`, `Set`, `Ensure` and `Replace` take the allocator and free what they displace with it ([releasing](#releasing-what-a-container-holds)). `TextMap.Remove(a, k)` frees its copy of the key. A `TextMap`'s operations are O(1 + `k.Len()`).
+- On a `HeapMap` or `TextMap`, `Set`, `Ensure` and `Replace` take the allocator and free what they displace with it ([releasing](#releasing-what-a-container-holds)). `TextMap.Remove(a, k)` frees its copy of the key, if it made one. A `TextMap`'s operations are O(1 + `k.Len()`).
 - `Iter` is O(1) and a full walk O(capacity). A table never shrinks, so one `Next` on a sparse table may read up to capacity / 8 groups.
 
 **Which types compare and hash.** A reference `&T` has `Eq`, `Ord` and `Hash` when `T` has them, and they look at the value it points to, never the address. So `Map[&K, V]` works when `K: Hash + Eq`. The primitive types implement:
@@ -1005,7 +1005,7 @@ boxed 42
 ```
 
 - Every call that may allocate takes `a`, and the container checks that it is the allocator it was made with.
-- `Free` of a `TextMap[HeapText]` frees each `HeapText` and each key copy, then the table.
+- `Free` of a `TextMap[HeapText]` frees each `HeapText` and each key copy (keys of 16 bytes or more), then the table.
 
 ### Format a table
 
@@ -3732,10 +3732,18 @@ pattern-defeating quicksort.
 export Slice[T].SortStable(mut self, const less: fn(&T, &T): bool)
 ```
 
-Sorts the elements by less, in place, keeping equal elements in their
-order. O(n log n) calls of less and O(n log n) swaps on every input;
-allocates nothing. SortStableIn gives the same order, using scratch
-memory from an allocator. The algorithm is a block merge sort.
+Sorts the elements by less, keeping equal elements in their order.
+O(n log n) calls of less and moves on every input. It allocates: past
+20 elements it merges through scratch memory of Len() / 2 elements or
+more (the whole slice while that is at most 8,000,000 bytes), on the
+stack when that fits in 4,096 bytes and T is aligned to at most 8, else
+from the process heap, freed before it returns; through scratch, input
+that is already sorted or strictly descending costs O(n). When its
+scratch is larger than the stack's and the heap is out of memory, at
+compile time or in a freestanding program, it sorts in place instead,
+with the same result. SortStableIn takes the scratch from an allocator
+it is given. The algorithm is Rust's driftsort, and in place a block
+merge sort.
 
 ### `Slice.SortStableIn`
 
@@ -3746,12 +3754,13 @@ export Slice[T].SortStableIn(mut self, a: &Alloc, const less: fn(&T, &T): bool):
 - Errors: OutOfMemory
 
 Sorts the elements by less, keeping equal elements in their order, as
-SortStable does, with a merge through Len() / 2 elements of scratch
-memory from a, freed before it returns. O(n log n) calls of less and
-O(n log n) moves on every input. Below 32 elements, and for a zero-size
-T, it sorts in place and allocates nothing. Fails with OutOfMemory when
-the scratch cannot be allocated, before any element moves, so the slice
-is unchanged.
+SortStable does, with its scratch memory from a instead of the process
+heap: Len() / 2 elements, freed before it returns. O(n log n) calls of less and
+moves, O(n) on input that is already sorted or strictly descending.
+Below 32 elements, and for a
+zero-size T, it sorts in place and allocates nothing. Fails with
+OutOfMemory when the scratch cannot be allocated, before any element
+moves, so the slice is unchanged.
 
 ### `Slice.SplitAt`
 
@@ -4094,10 +4103,11 @@ export linear view struct TextMap[V]
 ```
 
 A hash map from text to V whose table and key copies come from an
-allocator. Set copies a new key into memory from a, and Remove and Free
-give that memory back. It remembers its allocator, and an allocation or
-free with another one panics (code 12). Linear: end it with Free,
-FreeEmpty or FreeEach.
+allocator. A new key of up to 15 bytes is kept inside the table, with no
+allocation of its own; Set copies a longer new key into memory from a,
+and Remove and Free give that memory back. It remembers its allocator,
+and an allocation or free with another one panics (code 12). Linear: end
+it with Free, FreeEmpty or FreeEach.
 
 ### `TextMap.Ensure`
 
@@ -4111,7 +4121,7 @@ export TextMap[V].Ensure(mut self, a: &Alloc, k: str, v: V into self): OutOfMemo
 The value for k, writable, inserting v first when k is absent. When k is
 present the given v is released with a; a call is E0701 when V is linear
 and not Free. OutOfMemory as Set. Expected O(1 + k.Len()); a new key is
-copied as Set copies it.
+copied, or kept in the table, as Set does.
 
 ### `TextMap.FreeEach`
 
@@ -4208,9 +4218,9 @@ export TextMap[V].Remove(mut self, a: &Alloc, k: str): ?V
 - Flows: The result borrows what self refers to; self is free after the call.
 
 Removes k and returns its value, or none when k is absent. The map's copy
-of the key goes back to a, which must be the map's allocator (code 12
-otherwise). The empty key has no copy, so removing it does not look at a.
-Expected O(1 + k.Len()).
+of the key, if it made one, goes back to a, which must be the map's
+allocator (code 12 otherwise). The empty key has no copy, so removing it
+does not look at a. Expected O(1 + k.Len()).
 
 ### `TextMap.Replace`
 
@@ -4222,8 +4232,8 @@ export TextMap[V].Replace(mut self, a: &Alloc, k: str, v: V into self): OutOfMem
 - Errors: OutOfMemory
 
 Sets k's value to v and returns the old value, or none when k was absent.
-OutOfMemory as Set. Expected O(1 + k.Len()); a new key is copied as Set
-copies it.
+OutOfMemory as Set. Expected O(1 + k.Len()); a new key is copied, or kept
+in the table, as Set does.
 
 ### `TextMap.Set`
 
@@ -4236,8 +4246,9 @@ export TextMap[V].Set(mut self, a: &Alloc, k: str, v: V into self): OutOfMemory!
 Sets k's value to v. When k is present its old value is released with a;
 a call is E0701 when V is linear and not Free. OutOfMemory when copying a
 new key or growing the table fails, and then the caller still owns v.
-Expected O(1 + k.Len()); a new key is copied into k.Len() bytes from a,
-which the map owns.
+Expected O(1 + k.Len()); a new key of 16 bytes or more is copied into
+k.Len() bytes from a, which the map owns, and a shorter one is kept in
+the table.
 
 ### `TextMapIter`
 

@@ -162,7 +162,7 @@ No C runtime is linked. The memory functions, stack probes, the task switch and 
 
 - **Inline assembly.** Each `asm` statement becomes one LLVM inline-asm call, Intel syntax unless `att`. `.s` files go through Clang.
 - **Stack overflow.** Each task stack has a guard page below it, and frames larger than a page probe it, so an overflow always faults on the guard.
-- **ABI lowering** is its own package, `abi`, tested against Clang's choices per target. A type's ABI class is stored in its shape.
+- **ABI lowering** is its own package, `abi`, tested against Clang's choices per target. A type's ABI class is stored in its shape. A function that only Mk calls directly (not `extern` or `export extern`, never used as a value or named by an `asm` `sym` operand, not spawned, not `naked`, with no `section` clause and on no `become` edge) has an internal lowering: on `x86_64-windows` outside `--debug`, a 9- to 16-byte aggregate of integers and pointers travels in two registers, as System V passes it, instead of by reference (`abi.LowerInternal`).
 - **Profile-guided optimization** is done in the front end, because LLVM's instrumentation needs a profile runtime written in C. `mk build --release --pgo-gen` counts function entries and branch edges, and the program writes a `.mkprof` file on exit. `mk profile merge` sums profiles. `--pgo=<file>`, or a `default.mkprof` in the package root, gives LLVM branch weights, entry counts and hot and cold attributes. A function is matched by its stable key and a checksum of its MIR block structure, so a stale entry is ignored, never misapplied.
 
 ## 9. Determinism

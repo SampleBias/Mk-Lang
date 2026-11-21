@@ -1,0 +1,10 @@
+swap 4 3
+mid [cdef]
+wide 4531
+find 1
+find none
+parse 1234
+parse bad -2
+flip 1 2
+twice 13 -7
+walk 122

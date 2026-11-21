@@ -62,40 +62,87 @@ const NameIp: u32 = 7
 
 // ReadExtensions reads the Extensions SEQUENCE list.
 ReadExtensions(der: []u8, list: &El): Malformed!Ext {
+    return try ReadExtensionsBy(der, list, true)
+}
+
+// ReadExtensionsBy is ReadExtensions, reading each extension's elements
+// in place when short_form is true and they are in the short form, else always
+// with the cursor: the test's two walks.
+ReadExtensionsBy(der: []u8, list: &El, short_form: bool): Malformed!Ext {
     var out := Ext(flags: 0, path_len: -1, key_usage: 0, san: NoSpan, permitted: NoSpan, excluded: NoSpan)
     var seen_at: [64]int = [0; 64]
     var seen_end: [64]int = [0; 64]
     var n := 0
     var c := Inside(der, list)
     for c.More() {
-        e := try c.Want(16, true)
-        var ec := Inside(der, &e)
-        oe := try ec.Want(6, false)
-        if !OidValid(Content(der, &oe)) {
-            fail Malformed(offset: oe.at)
-        }
+        // An extension's SEQUENCE { OID, BOOLEAN DEFAULT FALSE, OCTET STRING }
+        // with every element in DER's short form and valid is read here, in
+        // place; any other goes through the cursor, for its answer and its
+        // offset.
+        start := c.pos
+        var oid_at := 0
+        var oid_end := 0
         var critical := false
-        if ec.Peek(0, 1) {
-            be := try ec.Want(1, false)
-            bb := Content(der, &be)
-            if bb.Len() != 1 || (bb[0] != 0 && bb[0] != 0xFF) {
-                fail Malformed(offset: be.at)
+        var ve := El(tag: 4, class: 0, cons: false, start: 0, at: 0, end: 0)
+        var short := false
+        if short_form && start + 1 < c.end && der[start] == 0x30 && der[start + 1] < 0x80 && int(der[start + 1]) <= c.end - start - 2 {
+            end := start + 2 + int(der[start + 1])
+            q := start + 2
+            if q + 1 < end && der[q] == 0x06 && der[q + 1] < 0x80 && int(der[q + 1]) <= end - q - 2 && OidValid(der[q + 2..q + 2 + int(der[q + 1])]) {
+                at := q + 2
+                var r := at + int(der[q + 1])
+                oend := r
+                var ok := true
+                if r < end && (der[r] & 0xDF) == 0x01 {
+                    // The BOOLEAN Peek(0, 1) finds: primitive, one byte, 0 or
+                    // 0xFF.
+                    ok = der[r] == 0x01 && r + 2 < end && der[r + 1] == 1 && (der[r + 2] == 0 || der[r + 2] == 0xFF)
+                    if ok {
+                        critical = der[r + 2] == 0xFF
+                        r += 3
+                    }
+                }
+                if ok && r + 1 < end && der[r] == 0x04 && der[r + 1] < 0x80 && int(der[r + 1]) == end - r - 2 {
+                    oid_at = at
+                    oid_end = oend
+                    ve = El(tag: 4, class: 0, cons: false, start: r, at: r + 2, end: end)
+                    c.pos = end
+                    short = true
+                }
             }
-            critical = bb[0] == 0xFF
         }
-        ve := try ec.Want(4, false)
-        try ec.Finish()
-        o := Content(der, &oe)
+        if !short {
+            critical = false
+            e := try c.Want(16, true)
+            var ec := Inside(der, &e)
+            oe := try ec.Want(6, false)
+            if !OidValid(Content(der, &oe)) {
+                fail Malformed(offset: oe.at)
+            }
+            if ec.Peek(0, 1) {
+                be := try ec.Want(1, false)
+                bb := Content(der, &be)
+                if bb.Len() != 1 || (bb[0] != 0 && bb[0] != 0xFF) {
+                    fail Malformed(offset: be.at)
+                }
+                critical = bb[0] == 0xFF
+            }
+            ve = try ec.Want(4, false)
+            try ec.Finish()
+            oid_at = oe.at
+            oid_end = oe.end
+        }
+        o := der[oid_at..oid_end]
         if n == MaxExtensions {
-            fail Malformed(offset: e.start)
+            fail Malformed(offset: start)
         }
         for i in 0..n {
             if Same(o, der[seen_at[i]..seen_end[i]]) {
-                fail Malformed(offset: e.start)
+                fail Malformed(offset: start)
             }
         }
-        seen_at[n] = oe.at
-        seen_end[n] = oe.end
+        seen_at[n] = oid_at
+        seen_end[n] = oid_end
         n += 1
         handled := try ReadExtension(der, o, &ve, critical, mut out)
         if critical && !handled {

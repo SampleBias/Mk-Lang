@@ -19,8 +19,18 @@ import (
 var h11CrcOff = []sdForce{{"simd/kernel/crc32.mk", `id.Has("pclmul")`, "false", 1}}
 
 // h11CrcBreakKernel breaks the fold (the register enters it xored with
-// 1), so a checksum of 64 bytes or more is right only when the table ran.
-var h11CrcBreakKernel = []sdForce{{"simd/kernel/crc32.mk", "[u64(c), 0]", "[u64(c) ^ 1, 0]", 1}}
+// 1) on both its paths, so a checksum of 64 bytes or more is right only
+// when the table ran.
+var h11CrcBreakKernel = append(append([]sdForce{}, h11CrcBreakNarrow...), h11CrcBreakWide...)
+
+// h11CrcBreakNarrow breaks only the 128-bit fold (Crc32Ni), and
+// h11CrcBreakWide only the AVX-512 one (Crc32Wide).
+var h11CrcBreakNarrow = []sdForce{{"simd/kernel/crc32.mk", "[u64(c), 0]", "[u64(c) ^ 1, 0]", 1}}
+var h11CrcBreakWide = []sdForce{{"simd/kernel/crc32.mk", "[u64(c), 0, 0, 0, 0, 0, 0, 0]", "[u64(c) ^ 1, 0, 0, 0, 0, 0, 0, 0]", 1}}
+
+// h11CrcNoWide masks the kernel's avx512f test, so every fold takes the
+// 128-bit path.
+var h11CrcNoWide = []sdForce{{"simd/kernel/crc32.mk", `id.Has("avx512f")`, "false", 1}}
 
 // h11CrcLens are the one-shot and stream lengths: every length to 300 (the
 // kernel's 64-byte threshold, its four-way loop, its 16-byte loop and the
@@ -30,7 +40,8 @@ var h11CrcLens = append(s8Range(0, 300), 447, 448, 511, 512, 513, 1000, 4095, 40
 // h11CrcEval are the lengths of h2ConstText checksummed at compile time.
 var h11CrcEval = []int{0, 9, 63, 64, 65, 128, 200, len(h2ConstText)}
 
-// h11CrcProgram prints whether simd.Cpu() has pclmul and aes, then per
+// h11CrcProgram prints whether simd.Cpu() has pclmul and aes, and whether
+// the wide fold can run (also avx512f and vpclmulqdq on x86_64), then per
 // length of h11CrcEval the compile-time Crc32 of h2ConstText's prefix
 // ("E"), then per length of h11CrcLens the one-shot Crc32 ("L") and a
 // Crc32State fed in seeded random pieces ("S") of splitmix64 bytes, at an
@@ -48,7 +59,8 @@ func h11CrcProgram() string {
 export Main(sys: &System): WriteError|OutOfMemory!void {
     var out := sys.Stdout()
     clmul := simd.Cpu().Has("pclmul") && simd.Cpu().Has("aes")
-    try Print(mut out, "cpu {c}\n", (c: clmul))
+    wide := clmul && Target.arch == Arch.X64 && simd.Cpu().Has("avx512f") && simd.Cpu().Has("vpclmulqdq")
+    try Print(mut out, "cpu {c} wide {w}\n", (c: clmul, w: wide))
 `)
 	for i := range h11CrcEval {
 		fmt.Fprintf(&b, "    try Print(mut out, \"E {x}\\n\", (x: E%d))\n", i)
@@ -105,17 +117,27 @@ func h11CrcWant() []string {
 // line.
 func h11CrcRun(t *testing.T, forces []sdForce, flags ...string) (bool, []string) {
 	t.Helper()
+	has, _, lines := h11CrcRunWide(t, forces, flags...)
+	return has, lines
+}
+
+// h11CrcRunWide is h11CrcRun that also returns whether the wide fold can
+// run.
+func h11CrcRunWide(t *testing.T, forces []sdForce, flags ...string) (bool, bool, []string) {
+	t.Helper()
 	got := h2Run(t, sdFixtures(t, forces), h11CrcProgram(), flags...)
 	lines := strings.Split(strings.TrimSuffix(got, "\n"), "\n")
 	if len(lines) == 0 || !strings.HasPrefix(lines[0], "cpu ") {
 		t.Fatalf("no cpu line:\n%.2000s", got)
 	}
-	return lines[0] == "cpu true", lines[1:]
+	return strings.HasPrefix(lines[0], "cpu true"), strings.HasSuffix(lines[0], "wide true"), lines[1:]
 }
 
 // TestHash_Crc32PathsMatchGo: hash.Crc32 and Crc32State, as built (the
-// kernel where the CPU has pclmul and aes) and with the CPU test masked
-// (the table on any machine), at dev and release, equal hash/crc32's IEEE
+// kernel where the CPU has pclmul and aes, its wide fold from 256 bytes
+// where it also has avx512f and vpclmulqdq), with the wide fold masked
+// (the 128-bit fold) and with the CPU test masked (the table on any
+// machine), at dev and release, equal hash/crc32's IEEE
 // checksums, and so do the compile-time checksums (the evaluator, whose
 // Cpu() is the baseline, so the table). "123456789" gives 0xCBF43926.
 func TestHash_Crc32PathsMatchGo(t *testing.T) {
@@ -133,6 +155,8 @@ func TestHash_Crc32PathsMatchGo(t *testing.T) {
 		{"dispatch-release", nil, []string{"--release"}},
 		{"masked-dev", h11CrcOff, nil},
 		{"masked-release", h11CrcOff, []string{"--release"}},
+		{"narrow-dev", h11CrcNoWide, nil},
+		{"narrow-release", h11CrcNoWide, []string{"--release"}},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			t.Parallel()
@@ -189,6 +213,41 @@ func TestHash_Crc32KernelRuns(t *testing.T) {
 				}
 			}
 			t.Logf("one-shot lines through the kernel: %d, through the table: %d", wrong, right)
+		})
+	}
+}
+
+// TestHash_Crc32WideFoldRuns: with only the 128-bit fold broken, a build
+// on a CPU with avx512f and vpclmulqdq gives wrong one-shot checksums
+// exactly from 64 to 255 bytes and right ones from 256 (the wide fold);
+// with only the wide fold broken, wrong ones exactly from 256 bytes. So
+// the wide fold runs, and only where it should.
+func TestHash_Crc32WideFoldRuns(t *testing.T) {
+	t.Parallel()
+	want := h11CrcWant()
+	for _, c := range []struct {
+		name   string
+		forces []sdForce
+		lo, hi int
+	}{
+		{"narrow-broken", h11CrcBreakNarrow, 64, 256},
+		{"wide-broken", h11CrcBreakWide, 256, 1 << 30},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+			_, wide, got := h11CrcRunWide(t, c.forces, "--release")
+			if len(got) != len(want) {
+				t.Fatalf("%d lines, want %d", len(got), len(want))
+			}
+			if !wide {
+				t.Skip("this CPU lacks avx512f or vpclmulqdq: the wide fold cannot run")
+			}
+			for k, n := range h11CrcLens {
+				i := len(h11CrcEval) + 2*k
+				if (got[i] != want[i]) != (n >= c.lo && n < c.hi) {
+					t.Errorf("length %d: %q against %q; want wrong exactly from %d to below %d bytes", n, got[i], want[i], c.lo, c.hi)
+				}
+			}
 		})
 	}
 }

@@ -62,6 +62,8 @@ struct SegHeader {
     // idle is 1 while the segment is counted in HeapState.empty: every
     // page free and some page committed (TrimHeap's candidates).
     idle: u32
+    // A small segment's free pages; for a huge reservation, the bytes it
+    // reserves past its first commit (HeapState.spare's share).
     free_pages: u64
     bytes: int
     cap: int
@@ -89,6 +91,11 @@ export struct HeapState {
     // the one empty longest. Under lock.
     idle_head: *SegHeader
     idle_tail: *SegHeader
+    // spare is the address space huge blocks may still reserve past what
+    // they commit (HugeAlloc takes, HeapFree gives back): HugeSpareBudget
+    // from HeapInit, or 0 when the address space is limited
+    // (sys.AddressLimited) and before HeapInit.
+    spare: raw.Atomic[int]
 }
 
 // A carrier's magazine of one small class: a stack of free blocks that only
@@ -653,7 +660,13 @@ LargeAlloc(hs: *HeapState, n: int): *u8 {
 }
 
 // HugeAlloc gives a request over 1 MiB, or aligned beyond 4 KiB, its own
-// reservation, committed whole so the commit limit fails here.
+// reservation. The request's pages are committed whole, so the commit
+// limit fails here; the reservation spans HugeSpare times them (at most
+// HugeSpareMax more, and only while HugeSpareBudget lasts), or just them
+// when the address space refuses the larger one, so HeapResize can grow
+// the block in place by committing more of it. A growing list then
+// neither copies its elements nor touches fresh pages for them at each
+// doubling, as it would with a new block.
 HugeAlloc(size: int, align: int): *u8 {
     var lead := PageBytes
     if align > lead {
@@ -667,24 +680,102 @@ HugeAlloc(size: int, align: int): *u8 {
         return raw.Null[u8]()
     }
     total := (lead + size + PageBytes - 1) / PageBytes * PageBytes
-    base := sys.Reserve(total, res_align)
+    // The spare part is total * 15 below HugeSpareMax, which the compare
+    // keeps from wrapping, else HugeSpareMax; total is under 2^63 - 2^34
+    // (lead is a power of two in int, size at most 2^46), so the sum does
+    // not wrap either. Wrapping operators keep their checks out of every
+    // program's heap.
+    var extra := HugeSpareMax
+    if total < HugeSpareMax / (HugeSpare - 1) {
+        extra = total *% (HugeSpare - 1)
+    }
+    // The spare comes out of the heap's budget (HeapState.spare), or the
+    // block gets none; HeapFree gives it back. The Add's old value says
+    // whether the budget held it; when not, the Add is undone.
+    hs := HS()
+    unsafe "the RtState page" {
+        if (*hs).spare.Add(0 -% extra) < extra {
+            _ = (*hs).spare.Add(extra)
+            extra = 0
+        }
+    }
+    var base := sys.Reserve(total +% extra, res_align)
+    if raw.IsNull(base) && extra != 0 {
+        unsafe "the RtState page" {
+            _ = (*hs).spare.Add(extra)
+        }
+        extra = 0
+        base = sys.Reserve(total, res_align)
+    }
     if raw.IsNull(base) {
         return base
     }
     if !sys.Commit(base, total) {
-        sys.Release(base, total)
+        sys.Release(base, total +% extra)
+        unsafe "the RtState page" {
+            _ = (*hs).spare.Add(extra)
+        }
         return raw.Null[u8]()
     }
-    unsafe "base is the fresh reservation, committed" {
+    unsafe "base is the fresh reservation, its first total bytes committed" {
         p := raw.Offset(base, lead)
-        HugeHeader(base, base, total, total - lead)
-        HugeHeader(raw.Offset(p, -PageBytes), base, total, total - lead)
+        HugeHeader(base, base, total +% extra, total - lead, extra)
+        HugeHeader(raw.Offset(p, -PageBytes), base, total +% extra, total - lead, extra)
         return p
     }
 }
 
-// HugeHeader writes a huge reservation's header at at.
-HugeHeader(at: *u8, base: *u8, total: int, cap: int) {
+// HugeSpare is how many times a huge block's first pages its reservation
+// spans, HugeSpareMax the most address space one block reserves past them
+// (16 GiB), and HugeSpareBudget the most all live huge blocks reserve past
+// what they first commit (64 GiB, an eighth of a 39-bit AArch64 address
+// space). A list that doubles from a block's first size grows in place four
+// times before it needs a new block. Address space is not memory: the part
+// not committed costs no commit charge and no page. It is virtual size,
+// though: a request aligned over 4 KiB is huge too, so 100 bytes at an
+// alignment of 8 KiB reserve 2 MiB. Where the address space is limited
+// (Linux RLIMIT_AS, ulimit -v), HeapInit leaves the budget at 0 and a huge
+// block reserves only its pages, as other reservations need that space. On
+// Linux a growing huge block is two mappings (the committed pages and the
+// rest), one more than before against vm.max_map_count.
+const HugeSpare: int = 16
+const HugeSpareMax: int = 1 << 34
+const HugeSpareBudget: int = 1 << 36
+
+// HugeGrow commits the pages of p's reservation that a size of new needs
+// past its capacity, and says whether it could: false when new does not
+// fit the reservation, or the OS refuses the commit (the commit limit), and
+// then nothing changed. Both headers of the reservation (the one at base,
+// and the one below p, which HeaderOf reads at an alignment of 4 MiB or
+// more) get the new capacity. Only the block's owner resizes or frees it,
+// so the headers need no lock.
+HugeGrow(h: *SegHeader, p: *u8, new: int): bool {
+    unsafe "h is the header of p's huge reservation; p is live" {
+        // The offsets lie inside the reservation (bytes, under 2^63):
+        // lead < bytes, new <= bytes - lead once past the compare, and the
+        // page rounding stays under bytes, so the wrapping operators are
+        // exact.
+        base := (*h).base
+        lead := Trunc[int](raw.Addr(p) -% base)
+        if new > (*h).bytes -% lead {
+            return false
+        }
+        have := lead +% (*h).cap
+        want := (lead +% new +% (PageBytes - 1)) & -PageBytes
+        if !sys.Commit(raw.FromAddr[u8](base +% Trunc[uint](have)), want -% have) {
+            return false
+        }
+        cap := want -% lead
+        (*raw.PtrCast[u8, SegHeader](raw.Offset(p, -PageBytes))).cap = cap
+        (*raw.FromAddr[SegHeader](base)).cap = cap
+        return true
+    }
+}
+
+// HugeHeader writes a huge reservation's header at at: bytes is the whole
+// reservation (what Release takes), cap the committed bytes from the block's
+// start.
+HugeHeader(at: *u8, base: *u8, total: int, cap: int, extra: int) {
     unsafe "at is committed memory of the reservation" {
         h := raw.PtrCast[u8, SegHeader](at)
         (*h).magic = SegMagic
@@ -692,6 +783,7 @@ HugeHeader(at: *u8, base: *u8, total: int, cap: int) {
         (*h).kind = KindHuge
         (*h).bytes = total
         (*h).cap = cap
+        (*h).free_pages = Trunc[u64](extra)
     }
 }
 
@@ -760,9 +852,14 @@ export HeapAlloc(var size: int, align: int): *u8 {
 
 /// HeapResize says whether the block p can hold new bytes in place (the
 /// AllocTable contract): true when new fits its class, its span's pages or
-/// its reservation's capacity, false otherwise. A dangling p cannot grow.
-/// O(1) for every kind: it compares with the block's metadata and commits,
-/// moves and allocates nothing.
+/// its reservation's capacity, false otherwise. A huge block whose
+/// capacity new passes grows in place when its reservation has room: the
+/// pages it needs are committed, and true; false, with nothing changed,
+/// when the reservation is too small or the OS refuses the commit. A
+/// dangling p cannot grow.
+/// O(1) for every kind: it compares with the block's metadata, and only a
+/// huge block's growth makes a system call, one commit; it moves and
+/// allocates nothing.
 export HeapResize(p: *u8, old: int, new: int, align: int): bool {
     if !Real(p) {
         return new <= 0
@@ -770,7 +867,7 @@ export HeapResize(p: *u8, old: int, new: int, align: int): bool {
     h := HeaderOf(p, align)
     unsafe "h is the header of p's segment or reservation" {
         if (*h).kind == KindHuge {
-            return new <= (*h).cap
+            return new <= (*h).cap || HugeGrow(h, p, new)
         }
         i := Trunc[int]((raw.Addr(p) - (*h).base) >> 16)
         m := raw.Of(&(*h).pages[i])
@@ -780,12 +877,13 @@ export HeapResize(p: *u8, old: int, new: int, align: int): bool {
 
 /// HeapUsable is the size of the block HeapAlloc returned at p for this
 /// align (db.sqlite asks it): its class size for a small block, the
-/// span's whole pages for a large one, the reservation's capacity for a
-/// huge one; 0 for the dangling pointer of a zero-size request. It is the
-/// bound HeapResize grows to in place, read from the same metadata, so
-/// every size from the request up to it is a valid old size for HeapResize
-/// and HeapFree. HeapFree reads only p and align, never size: a caller that
-/// frees with any size, or with HeapUsable's, frees the same block (this is
+/// span's whole pages for a large one, the committed capacity for a huge
+/// one; 0 for the dangling pointer of a zero-size request. It is the bound
+/// HeapResize grows to in place without a commit, read from the same
+/// metadata, so every size from the request up to it is a valid old size
+/// for HeapResize and HeapFree; a huge block's growth past it raises it.
+/// HeapFree reads only p and align, never size: a caller that frees with
+/// any size, or with HeapUsable's, frees the same block (this is
 /// what lets std.libc serve malloc_usable_size and free(p) with no header).
 /// Like HeapFree, it needs p live and the align of its allocation.
 /// O(1); allocates nothing.
@@ -816,7 +914,9 @@ export HeapFree(p: *u8, size: int, align: int) {
     h := HeaderOf(p, align)
     unsafe "h is the header of p's segment or reservation" {
         if (*h).kind == KindHuge {
+            extra := Trunc[int]((*h).free_pages)
             sys.Release(raw.FromAddr[u8]((*h).base), (*h).bytes)
+            _ = (*HS()).spare.Add(extra)
             return
         }
         hs := HS()

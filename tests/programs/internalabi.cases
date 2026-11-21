@@ -1,0 +1,7 @@
+# 9- to 16-byte values (structs of two ints, str, slices, ?int, an error union) across direct calls,
+# a fn table and a become: on x86_64-windows the direct calls pass them in register pairs and the
+# others by reference. Both profiles; Windows only, the one target whose lowering differs (the
+# others pass these values in registers under their C ABI).
+case ok
+target x86_64-windows
+stdout internalabi.out

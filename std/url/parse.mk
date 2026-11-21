@@ -1,11 +1,11 @@
 // Why: URLs are untrusted input, and only the URL Standard's own parser
 // gives the same answers as browsers and other conforming parsers.
 //
-// What: the URL Standard's basic URL parser (its section 4.4): Parse and
-// ParseWith (steps 1 to 3), the Parser with its state machine Parser.Run
-// (step 9), and one method per state, with the state's step numbers in
-// comments (the validation-error steps are not kept, as the standard
-// allows).
+// What: the URL Standard's basic URL parser (its section 4.4): Parse
+// (which tries plain.mk's ParsePlain first) and ParseWith (steps 1 to 3),
+// the Parser with its state machine Parser.Run (step 9), and one method
+// per state, with the state's step numbers in comments (the
+// validation-error steps are not kept, as the standard allows).
 //
 // How: the pointer and the buffer are offsets into the input: every state's
 // buffer is the input from Parser.buf to the pointer, and it is encoded
@@ -126,6 +126,12 @@ export Parse(a: &Arena, input: str into a, base: ?&Url): Error|OutOfMemory!Url f
 // record (a copy of the base in a): the tests' witness that an input that
 // does not need the base never copies it.
 ParseWith(a: &Arena, input: str into a, base: ?&Url, read: mut bool): Error|OutOfMemory!Url from a, input {
+    // An absolute URL in its serialized form, but for capitals in its
+    // scheme and host, reads no base: one pass decides it (ParsePlain).
+    if u := try ParsePlain(a, input) {
+        *read = false
+        return u
+    }
     b := input.AsBytes()
     // Step 1: trim leading and trailing C0 controls and spaces.
     var start := 0
@@ -1078,41 +1084,13 @@ IsDotSegment(s: []u8): bool {
 // host (the serializer's "/." step reads the segments) do not come here.
 // O(n); allocates nothing.
 Parser.PathRun(mut self): bool *self into self {
-    text := self.text
-    var i := self.p
-    var seg := i
-    var dots := false
-    for i < text.Len() {
-        k := PathBytes[int(text[i])]
-        if k == PathPlain {
-            i += 1
-            continue
-        }
-        if k == PathEnd {
-            break
-        }
-        if k == PathRefuse {
-            self.no_run = i
-            return false
-        }
-        if k == PathSlash {
-            if dots && IsDotSegment(text[seg..i]) {
-                self.no_run = i
-                return false
-            }
-            seg = i + 1
-            dots = false
-        } else {
-            dots = true
-        }
-        i += 1
-    }
-    if dots && IsDotSegment(text[seg..i]) {
-        self.no_run = i
+    end := PathRunEnd(self.text, self.p)
+    if end < 0 {
+        self.no_run = -1 - end
         return false
     }
-    self.url.tail = some(text[self.p..i])
-    self.p = i
+    self.url.tail = some(self.text[self.p..end])
+    self.p = end
     return true
 }
 

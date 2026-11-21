@@ -385,7 +385,7 @@ var rawSafe = map[string]bool{"Of": true, "OfMut": true, "Null": true, "IsNull":
 	"DataMut": true, "StrData": true, "Addr": true, "IsLinear": true, "Fail": true, "Fence": true, "FenceOrd": true, "Ctz64": true,
 	"AddCarry64": true, "SubBorrow64": true,
 	"Clz64": true, "Popcount64": true, "RotL64": true, "Mul128": true, "F64Bits": true, "F64From": true,
-	"F32Bits": true, "F32From": true, "SqrtF64": true}
+	"F32Bits": true, "F32From": true, "SqrtF64": true, "Select": true}
 
 // rawUnsafe reports whether it is a free function of the std module std.raw
 // that rawSafe does not mark safe (methods of raw.Atomic are all safe).

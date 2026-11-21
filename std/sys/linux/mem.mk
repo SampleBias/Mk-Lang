@@ -2,8 +2,8 @@
 // committed, discarded and guarded page by page, with Linux's overcommit
 // rules in mind.
 //
-// What: Reserve, Commit, CommitStack, Decommit, Discard, Release, GuardPage
-// and GuardStack.
+// What: Reserve, Commit, CommitStack, Decommit, Discard, Release, GuardPage,
+// GuardStack and AddressLimited.
 //
 // How: mmap, mprotect, munmap and madvise. Reserve and Decommit use
 // MAP_NORESERVE; Commit does not, so it is charged against the commit limit,
@@ -77,11 +77,43 @@ export Reserve(size: int, align: int): *u8 {
 // largest value, so the page rounding cannot overflow).
 const MaxReserve: int = 1 << 62
 
-/// Commit maps fresh read-write pages over [p, p+size), charged.
-/// O(1): one system call; commits size bytes.
+/// Commit maps fresh read-write pages over [p, p+size), charged. A refused
+/// commit (the commit limit) maps the range back as reserved; only if that
+/// map is refused too does the range stay unmapped, a hole in the
+/// caller's reservation.
+/// O(1): one system call, two when refused; commits size bytes.
 export Commit(p: *u8, size: int): bool {
     q := Map(p, size, ProtRW, MapPrivate | MapAnonymous | MapFixed)
-    return !raw.IsNull(q)
+    if !raw.IsNull(q) {
+        return true
+    }
+    // Some kernels (v6.6's mmap_region, for one) unmap the old range before
+    // the overcommit check, so a refused mmap can leave a hole in the
+    // caller's reservation, where an unrelated mapping could land and a
+    // later Release would unmap it. The range is mapped back with no access
+    // and no charge. A window remains: a mapping another thread makes
+    // between the two calls may land in the hole, and this map then
+    // replaces it. Closing it needs the kernel to check before it unmaps.
+    _ = Map(p, size, ProtNone, MapPrivate | MapAnonymous | MapFixed | MapNoReserve)
+    return false
+}
+
+// RlimitAs is RLIMIT_AS (include/uapi/asm-generic/resource.h).
+const RlimitAs: uint = 9
+
+/// AddressLimited reports whether the process's address space is limited
+/// (a finite soft RLIMIT_AS, as `ulimit -v` sets), so reservations past
+/// what is committed take from a budget other mappings need. False when
+/// the limit cannot be read.
+/// O(1): one system call; allocates nothing.
+export AddressLimited(): bool {
+    var lim: [2]u64 = [0; 2]
+    unsafe "system call; lim is a struct rlimit64 { cur, max }" {
+        if Syscall(Nrs().prlimit64, 0, RlimitAs, 0, raw.Addr(raw.DataMut(mut lim[..])), 0, 0) != 0 {
+            return false
+        }
+    }
+    return lim[0] != 0xFFFF_FFFF_FFFF_FFFF
 }
 
 /// CommitStack makes a task slot's range read-write: the kernel supplies

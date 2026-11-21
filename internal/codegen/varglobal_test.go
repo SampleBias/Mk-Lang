@@ -32,7 +32,7 @@ func varGlobalUnit(e *testEnv, lookup bool) *Unit {
 	v := e.consts.Intern(types.ConstValue{Type: ops, Align: 8, Bytes: make([]byte, 8),
 		Relocs: []types.Reloc{{Offset: 0, Kind: types.RelocFn, Fn: types.FnRef{Item: l2.Item}}}})
 	table := e.item("Table", types.KindGlobal, &types.GlobalDecl{Type: ops, Value: v, HasValue: true})
-	u := unitOf(e, []*mir.Body{l1})
+	u := cCallable(unitOf(e, []*mir.Body{l1})) // a const reloc: AddrTaken
 	u.Globals = []Global{{Item: table, Pack: 0}}
 	if lookup {
 		u.Lookup = func(item types.ItemID, args []types.GenericArg) (int, bool) {

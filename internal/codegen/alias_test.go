@@ -84,7 +84,7 @@ func TestAliasScopes(t *testing.T) {
 	tf.assign(place(0), use(mir.Copy(tf.b.Place(2, mir.Projection{Kind: mir.ProjIndex, A: 4, Type: types.Int}))), tf.at(4, 3))
 	tf.ret(tf.at(5, 3))
 	bodies = append(bodies, tf.b)
-	u := unitOf(e, bodies)
+	u := cCallable(unitOf(e, bodies)) // the C ABI's Indirect slices (internalabi_test.go)
 	for i := range u.Funcs {
 		if u.Funcs[i].Item == kx.Item {
 			u.Funcs[i].Symbol = "KernX"
@@ -238,7 +238,7 @@ func TestAliasMarkDropped(t *testing.T) {
 		}, plain),
 		kern("KernAsm", sl, func(f *fnb) { f.asmBody(mir.Asm{Template: "nop"}, f.at(1, 3)) }, plain),
 	}
-	win := emit(t, e, unitOf(e, bodies), types.X86_64Windows, types.Release)
+	win := emit(t, e, cCallable(unitOf(e, bodies)), types.X86_64Windows, types.Release)
 	decl := regexp.MustCompile(`noalias\.scope\.decl\(metadata`)
 	scoped := regexp.MustCompile(`(?m)^ +(?:%v[0-9]+ = )?(load|store) ([a-z0-9]+).*!alias\.scope`)
 	for name, want := range map[string]struct {

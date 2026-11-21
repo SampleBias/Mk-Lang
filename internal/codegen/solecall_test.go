@@ -52,7 +52,7 @@ func soleCallUnit(e *testEnv) *Unit {
 // memcpy and no alloca left.
 func TestSretWritable(t *testing.T) {
 	e := newTestEnv()
-	u := soleCallUnit(e)
+	u := cCallable(soleCallUnit(e)) // C's sret (internalabi_test.go)
 	// Dev: no alwaysinline mark (TestSoleCallInlines), so the call
 	// stays under -fno-inline and the copy's fate is MemCpyOpt's alone.
 	ll := emit(t, e, u, types.X86_64Windows, types.Dev)
@@ -265,21 +265,65 @@ func TestSoleCallKeepsImportedCallerSmall(t *testing.T) {
 	v = m.call(in, nil, types.I64, mir.Copy(place(1)))
 	m.assign(place(0), use(mir.Copy(place(v))), m.at(4, 3))
 	m.ret(m.at(4, 3))
+	// Far calls Mid twice, so Mid takes neither mark of smallfn.go (it is
+	// past the small bound with Leaf counted, and has two call sites).
 	o = e2.body(e2.fn("Far", []types.TypeID{types.I64}, types.I64, 0))
 	w = o.call(mid, nil, types.I64, mir.Copy(place(1)))
-	o.assign(place(0), use(mir.Copy(place(w))), o.at(6, 3))
+	w2 := o.call(mid, nil, types.I64, mir.Copy(place(w)))
+	o.assign(place(0), use(mir.Copy(place(w2))), o.at(6, 3))
 	o.ret(o.at(6, 3))
 	u = unitOf(e2, []*mir.Body{l.b, m.b, o.b})
 	u.Packs = [][]int{{0, 1}, {2}}
 	u.Funcs[2].Pack = 1
 	ll = emit(t, e2, u, types.X86_64Linux, types.Release)
-	// Mid's own definition may carry the cross-pack sole-call mark
-	// (smallfn.go: Far is its one caller); its call of Leaf may not.
+	if smallMarked(t, ll, "Mid") {
+		t.Fatalf("Mid, called twice from another pack, carries a definition mark: %s", defLine(ll, "mk.main.Mid"))
+	}
 	for _, cl := range soleCallLines(ll, "mk.main.Mid", "mk.main.Leaf") {
 		if strings.Contains(cl, "alwaysinline") {
 			t.Errorf("Mid, called from another pack, had its call of Leaf marked:\n%s", fnText(ll, "mk.main.Mid"))
 		}
 	}
+}
+
+// TestCrossSoleDispatcherIntoLoop: the std.hash.Sip13 shape
+// (std-hashmod/hash-sip13-short). Loop's loop, in pack 1, calls Disp once;
+// Disp, in pack 0 and not thin, calls Short (loop-free, past the small
+// bound) and Long (a loop) once each. Long stays a call in Disp, so no loop
+// ends up in Disp: Disp takes the cross-pack sole-call mark into Loop's
+// loop although its effect counts Long's loop. With that mark ThinLTO
+// imports Disp whatever its size, so its call of Short is marked although
+// another pack calls Disp; its call of Long is not.
+func TestCrossSoleDispatcherIntoLoop(t *testing.T) {
+	e := newTestEnv()
+	short, sh := soleLeaf(e, "Short", smallOps+8, false)
+	long, lo := soleLeaf(e, "Long", 1, true)
+	d := e.body(e.fn("Disp", []types.TypeID{types.Int}, types.Int, 0))
+	for range thinCallerBlocks {
+		nb := d.newBlock()
+		d.term(mir.Terminator{Kind: mir.TermGoto, Target: nb, Span: d.at(5, 3)})
+		d.cur = nb
+	}
+	v := d.call(short, nil, types.Int, mir.Copy(place(1)))
+	w := d.call(long, nil, types.Int, mir.Copy(place(v)))
+	d.assign(place(0), use(mir.Copy(place(w))), d.at(6, 3))
+	d.ret(d.at(7, 3))
+	m := soleCaller(e, "Loop", d.item, true, 0)
+	u := unitOf(e, []*mir.Body{sh.b, lo.b, d.b, m.b})
+	u.Packs = [][]int{{0, 1, 2}, {3}}
+	u.Funcs[3].Pack = 1
+	cfg := Config{Target: types.X86_64Linux, Profile: types.Release}
+	ll := emitCfg(t, e, u, 0, cfg)
+	if !smallMarked(t, ll, "Disp") {
+		t.Errorf("Disp, whose looping callee stays a call, lacks the cross-pack mark: %s", defLine(ll, "mk.main.Disp"))
+	}
+	if !soleMarked(t, ll, "Disp", "Short") {
+		t.Errorf("cross-marked Disp: its sole call of Short is not marked:\n%s", fnText(ll, "mk.main.Disp"))
+	}
+	if soleMarked(t, ll, "Disp", "Long") {
+		t.Errorf("Disp is not thin, but its call of the looping Long is marked:\n%s", fnText(ll, "mk.main.Disp"))
+	}
+	clangC(t, types.X86_64Linux, t.TempDir(), "d0", ll, "-O2")
 }
 
 // soleCallLines are the calls of callee in caller's definition, each with

@@ -12,9 +12,13 @@
 // remain, become UTF-8 words gathered by one shuffle per four units
 // (Pack). That is simdutf's utf16_to_utf8 at the 16-byte baseline. Only
 // surrogates and the end of the input go through Utf16Step, so malformed
-// input decodes exactly as the standard's decoder does.
+// input decodes exactly as the standard's decoder does. The other direction,
+// Utf16Write, takes sixteen ASCII bytes or any mix of one- to three-byte
+// scalars a vector step (std.simd.kernel's Utf8To16Step: one table lookup and
+// one pshufb).
 
 import std.simd
+import std.simd.kernel
 
 // Swap16 swaps the two bytes of every 16-bit lane, for UTF-16BE.
 Swap16(v: simd.Vec[u8, 16]): simd.Vec[u8, 16] {
@@ -233,8 +237,10 @@ Utf16Units(b: []u8): int {
 // Utf16Write writes valid UTF-8 b as UTF-16 units to out, which holds
 // exactly Utf16Units(b) units, in the byte order be says. Sixteen ASCII
 // bytes a step widen to sixteen units in two stores (the ASCII path of
-// simdutf's utf8_to_utf16); a block holding other bytes is written a
-// scalar at a time.
+// simdutf's utf8_to_utf16); other sixteen-byte blocks, while 16 bytes of
+// output remain, go through std.simd.kernel's Utf8To16Step, up to twelve bytes
+// a step; a four-byte scalar and the last 15 bytes are written a scalar at a
+// time.
 Utf16Write(b: []u8, out: mut []u8, be: bool) {
     n := b.Len()
     high := simd.Vec[u8, 16].Splat(0x80)
@@ -242,7 +248,6 @@ Utf16Write(b: []u8, out: mut []u8, be: bool) {
     var i := 0
     var o := 0
     for i < n {
-        var end := n
         if n - i >= 16 {
             v := simd.Vec[u8, 16].FromSlice(b, i)
             if !(v >= high).Any() {
@@ -257,27 +262,53 @@ Utf16Write(b: []u8, out: mut []u8, be: bool) {
                 o += 32
                 continue
             }
-            end = i + 16
-        }
-        for i < end {
-            lead := u32(b[i])
-            if lead < 0x80 {
-                PutUnit(out, o, lead, be)
-                o += 2
-                i += 1
-                continue
+            if out.Len() - o >= 16 {
+                st := kernel.Utf8To16Step(v)
+                if st.read > 0 {
+                    u := st.units.Reinterpret[u8, 16]()
+                    if be {
+                        Swap16(u).CopyTo(out, o)
+                    } else {
+                        u.CopyTo(out, o)
+                    }
+                    i += st.read
+                    o += 2 * st.wrote
+                    continue
+                }
+                // A four-byte scalar first: it and the four-byte scalars
+                // right after it go as surrogate pairs here, so a run of
+                // them (emoji) pays one failed step, not one each. Any
+                // other byte (only in invalid UTF-8, through raw.Str)
+                // falls to the scalar path below.
+                if b[i] >= 0xF0 {
+                    for i < n && b[i] >= 0xF0 {
+                        c := ScalarAt(b, i).c - 0x10000
+                        PutUnit(out, o, 0xD800 | (c >> 10), be)
+                        PutUnit(out, o + 2, 0xDC00 | (c & 0x3FF), be)
+                        o += 4
+                        i += 4
+                    }
+                    continue
+                }
             }
-            sc := ScalarAt(b, i)
-            if sc.c < 0x10000 {
-                PutUnit(out, o, sc.c, be)
-                o += 2
-            } else {
-                v := sc.c - 0x10000
-                PutUnit(out, o, 0xD800 | (v >> 10), be)
-                PutUnit(out, o + 2, 0xDC00 | (v & 0x3FF), be)
-                o += 4
-            }
-            i += sc.n
         }
+        lead := u32(b[i])
+        if lead < 0x80 {
+            PutUnit(out, o, lead, be)
+            o += 2
+            i += 1
+            continue
+        }
+        sc := ScalarAt(b, i)
+        if sc.c < 0x10000 {
+            PutUnit(out, o, sc.c, be)
+            o += 2
+        } else {
+            v := sc.c - 0x10000
+            PutUnit(out, o, 0xD800 | (v >> 10), be)
+            PutUnit(out, o + 2, 0xDC00 | (v & 0x3FF), be)
+            o += 4
+        }
+        i += sc.n
     }
 }

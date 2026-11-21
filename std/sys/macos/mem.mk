@@ -2,8 +2,8 @@
 // committed, discarded and guarded, and std's runtime asks for it in
 // 4 KiB units while arm64 macOS pages are 16 KiB.
 //
-// What: Reserve, Commit, CommitStack, Decommit, Discard, Release, GuardPage
-// and GuardStack.
+// What: Reserve, Commit, CommitStack, Decommit, Discard, Release, GuardPage,
+// GuardStack and AddressLimited.
 //
 // How: mmap, mprotect and munmap, on whole OS pages (PageSize). A request
 // that does not cover whole pages is rounded so that no live byte outside
@@ -157,6 +157,13 @@ export Discard(p: *u8, size: int) {
             _ = Map(raw.FromAddr[u8](lo), Trunc[int](hi - lo), ProtRW, MapFixed)
         }
     }
+}
+
+/// AddressLimited has std/sys/linux's contract; always false: macOS does
+/// not enforce RLIMIT_AS.
+/// O(1); allocates nothing.
+export AddressLimited(): bool {
+    return false
 }
 
 /// Release frees the whole reservation that Reserve returned at p.

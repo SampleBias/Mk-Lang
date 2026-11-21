@@ -110,3 +110,91 @@ func TestSTDSYNC_CancelFastTestInline(t *testing.T) {
 		}
 	}
 }
+
+// syncReadSlowProbe makes std.sync's RwReadSlow panic on entry.
+var syncReadSlowProbe = []syncProbe{
+	{"sync/rwlock.mk", "RwReadSlow[T](l: &RwLock[T], io: Io, old0: u32, added: bool): Canceled!void {\n",
+		"RwReadSlow[T](l: &RwLock[T], io: Io, old0: u32, added: bool): Canceled!void {\n    raw.Fail(99, \"probe: RwReadSlow\")\n"},
+}
+
+// TestSTDSYNC_LockReadFastStaysOffSlowPath: tests_rwlock.mk's block
+// "Conc-RwLock readers with no writer and no scope cancelled stay off
+// RwReadSlow" passes over a std whose RwReadSlow panics on entry, dev and
+// release, so LockRead's fast path (CancelClear, the Add and one compare)
+// decides on its own; and a block that reads after a write (the stale W
+// sends the first reader through RwReadSlow) fails with the probe, so the
+// probe is live.
+func TestSTDSYNC_LockReadFastStaysOffSlowPath(t *testing.T) {
+	const fast = "Conc-RwLock readers with no writer and no scope cancelled stay off RwReadSlow"
+	for profile, out := range syncProbedBlock(t, "std.sync", fast, syncReadSlowProbe) {
+		if !strings.Contains(out, fmt.Sprintf("PASS %s %q", "std.sync", fast)) {
+			t.Errorf("%s: the block did not pass with the probe\n%s", profile, out)
+		}
+	}
+	const slow = "Conc-RwLock write, two readers at once, Into"
+	for profile, out := range syncProbedBlock(t, "std.sync", slow, syncReadSlowProbe) {
+		if !strings.Contains(out, "probe: RwReadSlow") {
+			t.Errorf("%s: the probe did not fire after a write\n%s", profile, out)
+		}
+	}
+}
+
+// syncRwFullSrc is TestSTDSYNC_RwLockFullCountPanics's blocks: a LockRead
+// on a word preset to a full reader count, with W clear or set, on the
+// fast path or (slow) with another task's scope cancelled, so that
+// CancelClear is false and RwReadSlow makes the Add. Each must panic with
+// code 1. They are added to a scratch copy of tests_rwlock.mk, since a
+// panicking block would fail `mk test --std=std.sync` (TestSTDSYNC_TestBlocks).
+const syncRwFullSrc = `RwFullPanics(sys: &System, w0: u32, slow: bool) {
+    l := RwLock[i64].New(0)
+    on := atomic.AtomicInt.New(0)
+    stop := atomic.AtomicInt.New(0)
+    scope s := sys.io.Scope() {
+        if slow {
+            s.go RwHoldCancelled(sys.io, &on, &stop)
+            for on.Load() == 0 {
+                sys.io.Yield() else {}
+            }
+            Assert(!core.CancelClear(sys.io))
+        }
+        l.rs.Store(w0)
+        r := l.LockRead(sys.io).Must()
+        r.Unlock()
+        stop.Store(1)
+    }
+}
+
+test "RwFull count fast" (sys: &System) {
+    RwFullPanics(sys, RwCount, false)
+}
+
+test "RwFull count and W fast" (sys: &System) {
+    RwFullPanics(sys, RwW | RwCount, false)
+}
+
+test "RwFull count slow" (sys: &System) {
+    RwFullPanics(sys, RwCount, true)
+}
+
+test "RwFull count and W slow" (sys: &System) {
+    RwFullPanics(sys, RwW | RwCount, true)
+}
+
+`
+
+// TestSTDSYNC_RwLockFullCountPanics: LockRead documents a panic with code 1
+// past 2^30 - 1 readers. Each of syncRwFullSrc's four blocks, dev and
+// release, fails with that panic's message, so neither compare of the
+// bound (LockRead's and RwReadSlow's, W clear or set) can admit a full
+// count: turning either from < to <= makes a block pass.
+func TestSTDSYNC_RwLockFullCountPanics(t *testing.T) {
+	anchor := "RwHoldCancelled(io: Io, on: &atomic.AtomicInt, stop: &atomic.AtomicInt) {\n"
+	probes := []syncProbe{{"sync/tests_rwlock.mk", anchor, syncRwFullSrc + anchor}}
+	for _, name := range []string{"RwFull count fast", "RwFull count and W fast", "RwFull count slow", "RwFull count and W slow"} {
+		for profile, out := range syncProbedBlock(t, "std.sync", name, probes) {
+			if !strings.Contains(out, "RwLock: too many readers") || strings.Contains(out, fmt.Sprintf("PASS std.sync %q", name)) || strings.Contains(out, "(status 0)") {
+				t.Errorf("%s %s: the block did not panic with the full-count message\n%s", name, profile, out)
+			}
+		}
+	}
+}

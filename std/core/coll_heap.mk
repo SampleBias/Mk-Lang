@@ -9,7 +9,8 @@
 // How: each container records the allocator it was made with and compares it
 // with the one passed in only when it allocates or frees (panic code 12 on a
 // mismatch), so ordinary calls pay nothing. HeapMap and TextMap wrap the Swiss
-// Table of coll_table.mk; TextMap copies each absent key into memory from the
+// Table of coll_table.mk; TextMap keeps a key of up to 15 bytes inside its
+// slot (TextKey) and copies a longer absent key into memory from the
 // allocator. All are linear, so the program must release them.
 
 import std.raw
@@ -38,12 +39,13 @@ export linear view struct HeapMap[K: Hash + Eq, V] {
 }
 
 /// A hash map from text to V whose table and key copies come from an
-/// allocator. Set copies a new key into memory from a, and Remove and Free
-/// give that memory back. It remembers its allocator, and an allocation or
-/// free with another one panics (code 12). Linear: end it with Free,
-/// FreeEmpty or FreeEach.
+/// allocator. A new key of up to 15 bytes is kept inside the table, with no
+/// allocation of its own; Set copies a longer new key into memory from a,
+/// and Remove and Free give that memory back. It remembers its allocator,
+/// and an allocation or free with another one panics (code 12). Linear: end
+/// it with Free, FreeEmpty or FreeEach.
 export linear view struct TextMap[V] {
-    t: Table[str, V]
+    t: Table[TextKey, V]
     owner: *Alloc
     marker: [0]&V
 }
@@ -51,7 +53,7 @@ export linear view struct TextMap[V] {
 /// An iterator over a TextMap's entries, in the map's iteration order. The
 /// map stays borrowed while the iterator lives.
 export view struct TextMapIter[V] {
-    map: &Table[str, V]
+    map: &Table[TextKey, V]
     i: int
 }
 
@@ -467,18 +469,19 @@ export HeapMap[K, V].FreeEach(self, a: &Alloc, const release: fn(K, V)) {
 /// from untrusted input: use NewKeyed. O(1); allocates nothing until the
 /// first insert.
 export TextMap[V].New(a: &Alloc): TextMap[V] {
-    return TextMap[V](t: EmptyTable[str, V](), owner: raw.Of(a), marker: [])
+    return TextMap[V](t: EmptyTable[TextKey, V](), owner: raw.Of(a), marker: [])
 }
 
 /// As New, but hashing with SipHash-1-3 under key, for keys from
 /// untrusted input. O(1); allocates nothing.
 export TextMap[V].NewKeyed(a: &Alloc, key: HashKey): TextMap[V] {
-    return TextMap[V](t: EmptyTableKeyed[str, V](key), owner: raw.Of(a), marker: [])
+    return TextMap[V](t: EmptyTableKeyed[TextKey, V](key), owner: raw.Of(a), marker: [])
 }
 
 /// The value stored for k, or none. Expected O(1 + k.Len()); allocates nothing.
 export TextMap[V].Get(&self, k: str): ?&V {
-    i := TableFind(&self.t, TableHash(&self.t, &k), &k)
+    p := TextProbe(&self.t, k)
+    i := TableFind(&self.t, p.hash, &p.key)
     if i < 0 {
         return none
     }
@@ -488,7 +491,8 @@ export TextMap[V].Get(&self, k: str): ?&V {
 /// The value stored for k, writable in place, or none. Expected O(1 + k.Len());
 /// allocates nothing.
 export TextMap[V].GetMut(mut self, k: str): ?mut V {
-    i := TableFind(&self.t, TableHash(&self.t, &k), &k)
+    p := TextProbe(&self.t, k)
+    i := TableFind(&self.t, p.hash, &p.key)
     if i < 0 {
         return none
     }
@@ -498,16 +502,17 @@ export TextMap[V].GetMut(mut self, k: str): ?mut V {
 /// Sets k's value to v. When k is present its old value is released with a;
 /// a call is E0701 when V is linear and not Free. OutOfMemory when copying a
 /// new key or growing the table fails, and then the caller still owns v.
-/// Expected O(1 + k.Len()); a new key is copied into k.Len() bytes from a,
-/// which the map owns.
+/// Expected O(1 + k.Len()); a new key of 16 bytes or more is copied into
+/// k.Len() bytes from a, which the map owns, and a shorter one is kept in
+/// the table.
 export TextMap[V].Set(mut self, a: &Alloc, k: str, v: V into self): OutOfMemory!void {
-    hash := TableHash(&self.t, &k)
-    r := TableLookup(&self.t, hash, &k)
+    p := TextProbe(&self.t, k)
+    r := TableLookup(&self.t, p.hash, &p.key)
     if r.at >= 0 {
         ReleaseValue(Replace(SlotMut(ValueAt(self.t.slots, r.at), 0), v), a)
         return
     }
-    j := self.KeySlot(a, hash, r.free, k, "TextMap.Set")
+    j := self.KeySlot(a, p.hash, r.free, k, p.key, "TextMap.Set")
     if j < 0 {
         fail OutOfMemory
     }
@@ -515,15 +520,15 @@ export TextMap[V].Set(mut self, a: &Alloc, k: str, v: V into self): OutOfMemory!
 }
 
 /// Sets k's value to v and returns the old value, or none when k was absent.
-/// OutOfMemory as Set. Expected O(1 + k.Len()); a new key is copied as Set
-/// copies it.
+/// OutOfMemory as Set. Expected O(1 + k.Len()); a new key is copied, or kept
+/// in the table, as Set does.
 export TextMap[V].Replace(mut self, a: &Alloc, k: str, v: V into self): OutOfMemory!?V {
-    hash := TableHash(&self.t, &k)
-    r := TableLookup(&self.t, hash, &k)
+    p := TextProbe(&self.t, k)
+    r := TableLookup(&self.t, p.hash, &p.key)
     if r.at >= 0 {
         return some(Replace(SlotMut(ValueAt(self.t.slots, r.at), 0), v))
     }
-    j := self.KeySlot(a, hash, r.free, k, "TextMap.Replace")
+    j := self.KeySlot(a, p.hash, r.free, k, p.key, "TextMap.Replace")
     if j < 0 {
         fail OutOfMemory
     }
@@ -534,15 +539,15 @@ export TextMap[V].Replace(mut self, a: &Alloc, k: str, v: V into self): OutOfMem
 /// The value for k, writable, inserting v first when k is absent. When k is
 /// present the given v is released with a; a call is E0701 when V is linear
 /// and not Free. OutOfMemory as Set. Expected O(1 + k.Len()); a new key is
-/// copied as Set copies it.
+/// copied, or kept in the table, as Set does.
 export TextMap[V].Ensure(mut self, a: &Alloc, k: str, v: V into self): OutOfMemory!mut V from self {
-    hash := TableHash(&self.t, &k)
-    r := TableLookup(&self.t, hash, &k)
+    p := TextProbe(&self.t, k)
+    r := TableLookup(&self.t, p.hash, &p.key)
     if r.at >= 0 {
         ReleaseValue(v, a)
         return SlotMut(ValueAt(self.t.slots, r.at), 0)
     }
-    j := self.KeySlot(a, hash, r.free, k, "TextMap.Ensure")
+    j := self.KeySlot(a, p.hash, r.free, k, p.key, "TextMap.Ensure")
     if j < 0 {
         fail OutOfMemory
     }
@@ -550,41 +555,47 @@ export TextMap[V].Ensure(mut self, a: &Alloc, k: str, v: V into self): OutOfMemo
     return SlotMut(ValueAt(self.t.slots, j), 0)
 }
 
-// KeySlot copies k into memory from a and claims slot for it, so the key
-// copy and any growth come before the caller moves its value, so a failure
-// leaves the caller owning it; -1 when a is out of memory, with nothing
-// changed. The empty key into a table with room allocates nothing and
-// compares nothing.
-TextMap[V].KeySlot(mut self, a: &Alloc, hash: u64, slot: int, k: str, op: str): int {
+// KeySlot stores k, whose TextKeyOf is probe, and claims slot for it: an
+// inline probe (up to 15 bytes) is the key itself, kept in the slot; a
+// copied form, unless empty, is copied into memory from a. The key copy and
+// any growth come before the caller moves its value, so a failure leaves
+// the caller owning it; -1 when a is out of memory, with nothing changed.
+// The owner check is made for every nonempty key, inline or not, and for
+// growth, so a call with another allocator panics as it does for a copied
+// key.
+TextMap[V].KeySlot(mut self, a: &Alloc, hash: u64, slot: int, k: str, probe: TextKey, op: str): int {
     n := k.Len()
     if n > 0 || TablePlaceKind(&self.t, slot) == PlaceGrow {
         OwnerCheck(a, self.owner, op)
     }
-    var key := DanglingBytes()
-    if n > 0 {
-        key = AllocBytes(a, n, 1)
-        if raw.IsNull(key) {
+    var key := probe
+    copied := n > 0 && !TextKeyIsInline(&probe)
+    if copied {
+        p := AllocBytes(a, n, 1)
+        if raw.IsNull(p) {
             return -1
         }
-        CopyBytes(key, raw.StrData(k), n)
+        CopyBytes(p, raw.StrData(k), n)
+        key = TextKey(p: p, n: Trunc[u64](n))
     }
     j := TablePlace(mut self.t, a, true, hash, slot)
     if j < 0 {
-        if n > 0 {
-            FreeBytes(a, key, n, 1)
+        if copied {
+            FreeBytes(a, key.p, n, 1)
         }
         return -1
     }
-    SlotWrite(KeyAt(self.t.slots, j), 0, StrOf(key, n))
+    SlotWrite(KeyAt(self.t.slots, j), 0, key)
     return j
 }
 
 /// Removes k and returns its value, or none when k is absent. The map's copy
-/// of the key goes back to a, which must be the map's allocator (code 12
-/// otherwise). The empty key has no copy, so removing it does not look at a.
-/// Expected O(1 + k.Len()).
+/// of the key, if it made one, goes back to a, which must be the map's
+/// allocator (code 12 otherwise). The empty key has no copy, so removing it
+/// does not look at a. Expected O(1 + k.Len()).
 export TextMap[V].Remove(mut self, a: &Alloc, k: str): ?V {
-    i := TableFind(&self.t, TableHash(&self.t, &k), &k)
+    p := TextProbe(&self.t, k)
+    i := TableFind(&self.t, p.hash, &p.key)
     if i < 0 {
         return none
     }
@@ -597,10 +608,11 @@ export TextMap[V].Remove(mut self, a: &Alloc, k: str): ?V {
     return some(v)
 }
 
-// FreeKey returns a TextMap key's copy to a.
-FreeKey(a: &Alloc, key: str) {
-    if key.Len() > 0 {
-        FreeBytes(a, raw.StrData(key), key.Len(), 1)
+// FreeKey returns a TextMap key's copy to a; a key kept in its slot, and
+// the empty key, have none.
+FreeKey(a: &Alloc, key: TextKey) {
+    if !TextKeyIsInline(&key) && key.n > 0 {
+        FreeBytes(a, key.p, Trunc[int](key.n), 1)
     }
 }
 
@@ -626,7 +638,7 @@ export TextMapIter[V].Next(mut self): ?(key: str, value: &V) from self.map {
         return none
     }
     self.i = i + 1
-    return some((key: *SlotRef(KeyAt(self.map.slots, i), 0), value: SlotRef(ValueAt(self.map.slots, i), 0)))
+    return some((key: TextKeyStr[V](SlotRef(KeyAt(self.map.slots, i), 0)), value: SlotRef(ValueAt(self.map.slots, i), 0)))
 }
 
 /// Frees every key copy and releases every value with a, then frees the
@@ -686,6 +698,152 @@ export TextMap[V].FreeEach(self, a: &Alloc, const release: fn(V)) {
         left -= 1
     }
     TableFreeArrays(&t, a)
+}
+
+// TextKey is a TextMap key in its slot, 16 bytes, the size of a str. Its
+// copied form is a str's: p the key's bytes, n its length, whose top byte
+// is 0. Natively a key of up to TextKeyInline bytes is inline instead: its
+// bytes in order from byte 0 of the key to byte 14 (the targets are
+// little-endian; bytes 0 to 7 overlay p, mem_table.mk's TextKeyWord0), every
+// byte past the key zero, and byte 7 of n 0x80 | the length; so two inline
+// keys are equal exactly when both words are, and the bytes in memory are
+// the key's. A probe (TextKeyOf) has the same form, a copied one viewing the
+// caller's bytes. A compile-time evaluation makes no inline key, since its
+// memory keeps pointers and integers apart, so its keys are all copied;
+// TextKeyEq compares a key of one form with one of the other by their text.
+struct TextKey {
+    p: *u8
+    n: u64
+}
+
+// TextKeyInline is the longest key kept inline.
+const TextKeyInline: int = 15
+
+// TextKeyIsInline reports whether k is inline: the top byte of n holds the
+// tag.
+TextKeyIsInline(k: &TextKey): bool {
+    return k.n >> 56 != 0
+}
+
+// TextKeyOf is k's TextKey: inline when k has up to 15 bytes and the code
+// runs natively, read with a fixed number of loads, all inside k (FoldStr's
+// short reads); else the copied form over k's own bytes. Generic over the
+// map's value type only, so it is instantiated, and inlined, in the
+// caller's pack (FoldStr).
+TextKeyOf[V](k: str): TextKey {
+    n := k.Len()
+    if n > TextKeyInline || Evaluating() {
+        return TextKey(p: raw.StrData(k), n: Trunc[u64](n))
+    }
+    var w0: u64 = 0
+    var w1: u64 = 0
+    if n >= 8 {
+        w0 = LoadU64(k, 0)
+        if n > 8 {
+            w1 = LoadU64(k, n -% 8) >> ((8 *% (16 -% n)) & 63)
+        }
+    } else if n >= 4 {
+        b := k.AsBytes()
+        j := n -% 4
+        lo := u64(b[0]) | (u64(b[1]) << 8) | (u64(b[2]) << 16) | (u64(b[3]) << 24)
+        hi := u64(b[j]) | (u64(b[j +% 1]) << 8) | (u64(b[j +% 2]) << 16) | (u64(b[j +% 3]) << 24)
+        w0 = lo | (hi << ((8 *% j) & 63))
+    } else if n > 0 {
+        b := k.AsBytes()
+        m := n >> 1
+        e := n -% 1
+        w0 = u64(b[0]) | (u64(b[m]) << ((8 *% m) & 63)) | (u64(b[e]) << ((8 *% e) & 63))
+    }
+    return TextKeyInlineOf[V](w0, w1 | ((0x80 | Trunc[u64](n)) << 56))
+}
+
+// TextKeyStr is the text of the key at k: a view of the inline bytes in
+// place, or of the copy. Either lives as long as the slot or probe k
+// points at, which is what the view borrows. Generic over the key type
+// only, as TextKeyOf.
+TextKeyStr[K](k: &TextKey): str {
+    if TextKeyIsInline(k) {
+        return TextKeyInlineStr[K](k, Trunc[int]((k.n >> 56) & 0x7F))
+    }
+    return StrOf(k.p, Trunc[int](k.n))
+}
+
+// TextKeyEq is the comparison of every TextMap probe. Equal n words are
+// equal lengths: two inline keys are equal when their first words are too
+// (TextKeyWord0 is read only for an inline key), two copied ones when their
+// bytes are. Unequal n words with both inline or both copied are different
+// keys; a key of each form compares their text (a real table never holds
+// both, since natively each length has one form and an evaluation copies
+// every key; only a TextKey built directly meets this case). Generic over the key type only, as
+// TextKeyOf.
+TextKeyEq[K](a: &TextKey, b: &TextKey): bool {
+    if a.n == b.n {
+        if TextKeyIsInline(a) {
+            return TextKeyWord0[K](a) == TextKeyWord0[K](b)
+        }
+        n := Trunc[int](a.n)
+        return StrEq[K](StrOf(a.p, n), StrOf(b.p, n))
+    }
+    if TextKeyIsInline(a) == TextKeyIsInline(b) {
+        return false
+    }
+    return StrEq[K](TextKeyStr[K](a), TextKeyStr[K](b))
+}
+
+// TextProbe is k's TextKey (TextKeyOf) and its hash in t, the value
+// TableHash gives for k as a str key (FoldStr, or SipStrKeyed under a
+// NewKeyed table's key), so a TextMap orders its keys as a HeapMap[str, V]
+// with the same history would. An inline key's fold hash comes from its
+// words (TextKeyFold), with no second read of k. Generic over the map's
+// value type only, as TextKeyOf.
+TextProbe[V](t: &Table[TextKey, V], k: str): (hash: u64, key: TextKey) {
+    key := TextKeyOf[V](k)
+    if t.keyed {
+        return (hash: SipStrKeyed(t.k0, t.k1, k), key: key)
+    }
+    return (hash: TextKeyFold[V](&key), key: key)
+}
+
+// TextKeyFold is FoldStr of k's text. A copied key takes FoldStr itself;
+// an inline key of n bytes is FoldStr's arithmetic on its words, which
+// already hold FoldStr's reads, zero above the key: the text then 0xFF is
+// n + 1 bytes, at most 16, so FoldStr's loops never run. Below 8 bytes the
+// tail is the first word with the 0xFF on top (at 7 bytes it is a whole
+// waiting word, which folds the same way); from 8 bytes the first word
+// waits and the tail is n's key bytes with the 0xFF on top, and at 15 bytes that tail is a whole
+// word, folded with the first into lane 0. Generic over the key type only, as
+// TextKeyOf.
+TextKeyFold[K](k: &TextKey): u64 {
+    if !TextKeyIsInline(k) {
+        return FoldStr[K](StrOf(k.p, Trunc[int](k.n)))
+    }
+    w0 := TextKeyWord0[K](k)
+    n := Trunc[int]((k.n >> 56) & 0x7F)
+    total := Trunc[u64](n +% 1)
+    if n < 8 {
+        return FoldEnd((w0 | (Trunc[u64](0xFF) << ((8 *% n) & 63))) ^ FoldF0, FoldF2 ^ total)
+    }
+    t := (k.n & 0x00FFFFFFFFFFFFFF) | (Trunc[u64](0xFF) << ((8 *% (n -% 8)) & 63))
+    if n == 15 {
+        return FoldEnd(Fold(w0 ^ FoldF0, t ^ FoldF1), FoldF2 ^ total)
+    }
+    return FoldEnd(w0 ^ FoldF0, t ^ FoldF2 ^ total)
+}
+
+// TextKey's Hash and Eq are its text's, so HashOf, HashKeyed and KeyEq,
+// which take the TextKey branches in coll_table.mk, agree with them.
+impl Hash for TextKey {
+    Hash(&self, h: mut Hasher) {
+        h.Bytes(TextKeyStr[TextKey](self).AsBytes())
+        end: [1]u8 = [0xFF]
+        h.Bytes(end[..])
+    }
+}
+
+impl Eq for TextKey {
+    Eq(&self, other: &TextKey): bool {
+        return TextKeyEq[TextKey](self, other)
+    }
 }
 
 /// An empty text that will allocate from a. O(1); allocates nothing until the

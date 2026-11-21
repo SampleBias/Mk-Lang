@@ -168,7 +168,7 @@ func TestCallMainErrorNameRun(t *testing.T) {
 			}
 			e := newTestEnv()
 			bodies, bodiless := rtProgram(e)
-			ll := emit(t, e, unitOf(e, bodies, bodiless...), target, types.Dev)
+			ll := emit(t, e, cCallable(unitOf(e, bodies, bodiless...)), target, types.Dev) // the harness calls them
 			var sb strings.Builder
 			// ErrorName names the errors the program makes (errnames.go):
 			// these four, made by one more body.

@@ -26,7 +26,7 @@ var preludeNames = std.PreludeNames[:]
 
 // stdInternal is std.Internal: modules only std modules may import (E0202
 // reason std-internal), and std.simd.kernel, the std-only module of the
-// crypto kernels, and std.sys.lc, macOS's libSystem names, until
+// crypto and text vector kernels, and std.sys.lc, macOS's libSystem names, until
 // std.Internal names them too.
 var stdInternal = withModule(withModule(std.Internal[:], "std.simd.kernel"), "std.sys.lc")
 

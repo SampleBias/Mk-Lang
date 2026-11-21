@@ -24,8 +24,8 @@
 //     so without this a cpu "avx512bw" body would be inlined into a
 //     baseline caller and run its instructions there;
 //   - a caller that another pack calls is not grown, unless it has a cpu
-//     clause, so ThinLTO can still import it (the hash-sip13-short
-//     benchmark);
+//     clause or the cross-pack sole-call mark (smallfn.go), so ThinLTO can
+//     still import it (the hash-sip13-short benchmark);
 //   - the callee is at most soleCallOps operations, so the rule stays
 //     inside LLVM's bound instead of inlining whatever the size;
 //   - a callee with a loop is inlined only into a thin caller (no loop, at
@@ -168,10 +168,16 @@ func (fg *fnGen) soleCallAttr(t *mir.Terminator, fi int, attrs llvm.Attrs) llvm.
 	}
 	// A caller that another pack calls stays small enough for ThinLTO to
 	// import it there (-import-instr-limit 100), unless it has a cpu clause
-	// and so is never inlined into a baseline caller anyway: inlining
-	// SipShort into hash.Sip13 slowed std-hashmod/hash-sip13-short, because
-	// the benchmark's loop then called Sip13.
-	if sc.outside[g.u.Funcs[fg.fi].Item] && len(g.cpuOf(fg.fi)) == 0 {
+	// and so is never inlined into a baseline caller anyway, or it has the
+	// cross-pack sole-call mark (smallfn.go), which ThinLTO imports
+	// whatever its size into its one call, so growing it duplicates
+	// nothing: inlining SipShort into an unmarked hash.Sip13 slowed
+	// std-hashmod/hash-sip13-short, because Sip13's summary then passed the
+	// limit and the benchmark's loop called Sip13. A function codegen calls
+	// by itself (codegenCalled) never takes that mark, since its MIR call
+	// sites are not all its calls; the waiver checks that again rather than
+	// lean on how smallSet chose the mark.
+	if sc.outside[g.u.Funcs[fg.fi].Item] && len(g.cpuOf(fg.fi)) == 0 && (!g.crossSole(fg.fi) || g.codegenCalled(fg.fi)) {
 		return attrs
 	}
 	return attrs.Flag("alwaysinline")
@@ -220,11 +226,12 @@ func (g *packGen) soleEffectOf(fi int) soleEffect {
 		}
 		// A small callee (smallfn.go) is inlined wherever it is, and one
 		// with the cross-pack mark is inlined here, its one call, so
-		// either counts with its whole effect, loops included.
+		// either counts with its whole effect, and with a loop when one
+		// ends up in its body (smallLoops: a looping callee of a function
+		// that is not thin stays a call there).
 		if v := cg.callIndex(t); v != fi && g.u.Funcs[v].Body != nil && (g.smallFn(v) || g.crossSole(v)) {
-			e := g.smallFx(v)
-			fx.ops = min(fx.ops+e.ops, soleHuge)
-			fx.loops = fx.loops || e.loops
+			fx.ops = min(fx.ops+g.smallFx(v).ops, soleHuge)
+			fx.loops = fx.loops || g.smallLoops(v)
 			continue
 		}
 		j, ok := g.findFunc(t.Callee.Fn.Item, cg.calleeArgs(t))

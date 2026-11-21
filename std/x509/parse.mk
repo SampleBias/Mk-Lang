@@ -58,7 +58,26 @@ Where(e: encoding.Error): int {
 
 // Next reads the next element, failing at the byte where std.encoding's
 // reader stops (a length past the end of the enclosing element included).
+// The short form, a one-byte identifier and a one-byte length that fits,
+// is DER as it stands (X.690 8.1.2.2, 8.1.3.4) and is most of a
+// certificate's elements: Next reads it here, as std.encoding's reader
+// reads it, and hands every other form, and every fault, to NextDer.
 Cur.Next(mut self): Malformed!El {
+    if self.pos + 1 < self.end {
+        id := self.der[self.pos]
+        len := self.der[self.pos + 1]
+        if (id & 0x1F) != 0x1F && len < 0x80 && int(len) <= self.end - self.pos - 2 {
+            at := self.pos + 2
+            el := El(tag: u32(id & 0x1F), class: id >> 6, cons: id & 0x20 != 0, start: self.pos, at: at, end: at + int(len))
+            self.pos = at + int(len)
+            return el
+        }
+    }
+    return try self.NextDer()
+}
+
+// NextDer is Next through std.encoding's reader, for every form.
+Cur.NextDer(mut self): Malformed!El {
     if self.pos >= self.end {
         fail Malformed(offset: self.end)
     }
@@ -80,6 +99,21 @@ Cur.Next(mut self): Malformed!El {
 // Want reads the next element and fails unless it is universal with tag
 // number tag and the constructed bit cons.
 Cur.Want(mut self, tag: u32, cons: bool): Malformed!El {
+    // Next's short form, repeated here so the element is built once, in
+    // the result, and not copied out of Next's.
+    if self.pos + 1 < self.end {
+        id := self.der[self.pos]
+        len := self.der[self.pos + 1]
+        if (id & 0x1F) != 0x1F && len < 0x80 && int(len) <= self.end - self.pos - 2 {
+            start := self.pos
+            at := start + 2
+            self.pos = at + int(len)
+            if (id >> 6) != 0 || u32(id & 0x1F) != tag || (id & 0x20 != 0) != cons {
+                fail Malformed(offset: start)
+            }
+            return El(tag: tag, class: 0, cons: cons, start: start, at: at, end: at + int(len))
+        }
+    }
     e := try self.Next()
     if e.class != 0 || e.tag != tag || e.cons != cons {
         fail Malformed(offset: e.start)
@@ -245,6 +279,14 @@ ParseDer(der: []u8): Malformed!Certificate {
 // of SEQUENCE { OID, value }, each OID minimal with arcs below 2^31 and
 // each value a string Go's parseASN1String takes.
 CheckName(der: []u8, n: &El): Malformed!void {
+    if NameShort(der, n) {
+        return
+    }
+    try CheckNameCur(der, n)
+}
+
+// CheckNameCur is CheckName by the cursor, for every form.
+CheckNameCur(der: []u8, n: &El): Malformed!void {
     var rdns := Inside(der, n)
     for rdns.More() {
         set := try rdns.Want(17, true)
@@ -266,6 +308,50 @@ CheckName(der: []u8, n: &El): Malformed!void {
             try parts.Finish()
         }
     }
+}
+
+// NameShort is whether the cursor walk of CheckName passes over n with
+// every element in DER's short form (Cur.Next's own case): the same reads
+// and the same checks, in one loop over the bytes. false for any other
+// Name, which CheckName then walks with the cursor, for its answer and its
+// offset.
+NameShort(der: []u8, n: &El): bool {
+    var p := n.at
+    end := n.end
+    for p < end {
+        // A non-empty SET.
+        if p + 1 >= end || der[p] != 0x31 || der[p + 1] >= 0x80 || int(der[p + 1]) > end - p - 2 || der[p + 1] == 0 {
+            return false
+        }
+        set_end := p + 2 + int(der[p + 1])
+        var q := p + 2
+        p = set_end
+        for q < set_end {
+            // A SEQUENCE of an OID and a string, and nothing more.
+            if q + 1 >= set_end || der[q] != 0x30 || der[q + 1] >= 0x80 || int(der[q + 1]) > set_end - q - 2 {
+                return false
+            }
+            atv_end := q + 2 + int(der[q + 1])
+            o := q + 2
+            q = atv_end
+            if o + 1 >= atv_end || der[o] != 0x06 || der[o + 1] >= 0x80 || int(der[o + 1]) > atv_end - o - 2 {
+                return false
+            }
+            v := o + 2 + int(der[o + 1])
+            if !OidValid(der[o + 2..v]) {
+                return false
+            }
+            if v + 1 >= atv_end || der[v + 1] >= 0x80 || int(der[v + 1]) != atv_end - v - 2 {
+                return false
+            }
+            id := der[v]
+            tag := u32(id & 0x1F)
+            if (id & 0xE0) != 0 || tag == 0x1F || !StringTag(tag) || !StringValid(tag, der[v + 2..atv_end]) {
+                return false
+            }
+        }
+    }
+    return true
 }
 
 // CheckSpki checks a SubjectPublicKeyInfo (RFC 5280 4.1.2.7): SEQUENCE {
@@ -311,18 +397,18 @@ TimeOf(der: []u8, e: &El): Malformed!time.Time {
     var y := 0
     var i := 0
     if long {
-        y = Digits(b, 0, 4)
+        y = Two(b, 0) * 100 + Two(b, 2)
         i = 4
     } else {
-        y = Digits(b, 0, 2)
+        y = Two(b, 0)
         y += if y < 50 { 2000 } else { 1900 }
         i = 2
     }
-    month := Digits(b, i, 2)
-    day := Digits(b, i + 2, 2)
-    hour := Digits(b, i + 4, 2)
-    minute := Digits(b, i + 6, 2)
-    second := Digits(b, i + 8, 2)
+    month := Two(b, i)
+    day := Two(b, i + 2)
+    hour := Two(b, i + 4)
+    minute := Two(b, i + 6)
+    second := Two(b, i + 8)
     if month < 1 || month > 12 || day < 1 || day > MonthDays(y, month) || hour > 23 || minute > 59 || second > 59 {
         fail Malformed(offset: e.at)
     }
@@ -330,13 +416,9 @@ TimeOf(der: []u8, e: &El): Malformed!time.Time {
     return d.Time()
 }
 
-// Digits is the decimal number b[at..at + n], every byte a digit.
-Digits(b: []u8, at: int, n: int): int {
-    var v := 0
-    for i in at..at + n {
-        v = v * 10 + int(b[i] - b'0')
-    }
-    return v
+// Two is the decimal number b[at..at + 2], both bytes digits.
+Two(b: []u8, at: int): int {
+    return int(b[at] - b'0') * 10 + int(b[at + 1] - b'0')
 }
 
 // MonthDays is the length of month m of the proleptic Gregorian year y.

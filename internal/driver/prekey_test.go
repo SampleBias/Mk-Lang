@@ -388,6 +388,57 @@ func TestReleaseCalleeEffectLoopInAnotherPack(t *testing.T) {
 	pkVerify(t, cfg, filepath.Join(out, "verify.exe"), ed.exe)
 }
 
+// TestReleaseCalleeBodyLoopInAnotherPack: app's Loop calls app.M once, M
+// calls lib.J once, and the thin J calls lib2.Y and lib.Z once each, Z (not
+// thin) calling the looping lib.Q. J takes the cross-pack sole-call mark,
+// and while Y has no loop none ends up in J's body, so Loop's call of M
+// carries the sole-call mark. The edit gives Y a loop at the same
+// operation count: J's operations, its effect's loop (Z counts Q's) and
+// its marks stay as they were, but Y's loop now ends up in the thin J, so
+// M carries it and Loop's call of M loses its mark. app's pack key must
+// move; without the per-call loop bit PackFacts writes (codegen's
+// smallLoops) it hits its stale memo, which the MK_CACHE_VERIFY build
+// reports. Codegen's TestPackFactsCalleeBodyLoop moves the same bit.
+func TestReleaseCalleeBodyLoopInAnotherPack(t *testing.T) {
+	tools := needTools(t)
+	y := func(loop bool) string {
+		var b strings.Builder
+		b.WriteString("export Y(x: int): int {\n    var y := x\n")
+		first, last := 1, 18
+		if loop {
+			b.WriteString("    for _ in 0..3 {\n        y = y ^ (y >> 1)\n    }\n")
+			first, last = 2, 16
+		}
+		for i := first; i <= last; i++ {
+			fmt.Fprintf(&b, "    y = y ^ (y >> %d)\n", i)
+		}
+		b.WriteString("    return y\n}\n")
+		return b.String()
+	}
+	base := map[string]string{
+		"pkg.mk": manifest(map[string]string{"bins": `[pkg.Bin(name: "app", root: "app", link_script: "", cpu: "", subsystem: "console")]`}),
+		"app/app.mk": "import lib\n\nM(x: int): int {\n    return lib.J(x)\n}\n\n" +
+			"Loop(n: int): int {\n    var s := 0\n    for i in 0..n {\n        s = s +% M(i)\n    }\n    return s\n}\n\n" +
+			"export Main(sys: &System): WriteError!void {\n    try sys.Print(\"{v}\\n\", (v: Loop(sys.args.Len() + 4)))\n}\n",
+		"lib/lib.mk": "import lib2\n\nexport Q(x: int): int {\n    var s := x\n    for i in 0..x {\n        s = s +% i\n    }\n    return s\n}\n\n" +
+			"Z(x: int): int {\n    var r := x\n    if x > 1 {\n        r = r +% 1\n    }\n    if x > 2 {\n        r = r +% 2\n    }\n" +
+			"    if x > 3 {\n        r = r +% 3\n    }\n    return Q(r)\n}\n\n" +
+			"export J(x: int): int {\n    return Z(lib2.Y(x))\n}\n",
+		"lib2/lib2.mk": y(false),
+	}
+	dir := writeTree(t, base)
+	out := t.TempDir()
+	cfg := Config{Root: dir, Target: pkTarget(), Profile: types.Release, Tools: tools,
+		CacheDir: filepath.Join(t.TempDir(), "cache")}
+	pkBuild(t, cfg, filepath.Join(out, "cold.exe"))
+	pkWrite(t, dir, map[string]string{"lib2/lib2.mk": y(true)})
+	ed := pkBuild(t, cfg, filepath.Join(out, "edit.exe"))
+	if got := ed.emittedMods(); !slices.Contains(got, "lib2") || !slices.Contains(got, "app") {
+		t.Errorf("emitted %v, want lib2 (Y's body) and app (Loop's call of M lost its mark)", got)
+	}
+	pkVerify(t, cfg, filepath.Join(out, "verify.exe"), ed.exe)
+}
+
 // TestStdEditMissesEveryPack: under MK_STD (Config.StdDir) a std
 // file's change is not in the build ID; the front cache's context folds
 // every std file's hash, and the pack keys hold that context, so every

@@ -1,6 +1,7 @@
 // Why: the heap's size classes, huge blocks, in-place resize and failure
 // paths must hold exactly, since every allocation in std rests on them.
-// What: single-carrier tests RT-HeapClasses, RT-HeapHuge,
+// What: single-carrier tests RT-HeapClasses, RT-HeapHuge, RT-HeapHugeGrow,
+// RT-HeapHugeGrowModel, RT-HeapHugeBudget,
 // RT-HeapResizeInPlace, RT-HeapOOM, RT-F16-HeapZero, RT-Heap-ClassIndex,
 // RT-Heap-RunIn and RT-Heap-PathEdges, run by mk test over std.
 // How: the computed class and run search are checked against the first,
@@ -30,7 +31,7 @@ test "RT-HeapClasses RT-F9-HeapClassCount the 32 classes follow the rule of 3.8"
     Assert(Classes[31] == SmallMax)
     var hs: HeapState = HeapState(lock: raw.Atomic[u32].New(0), segs: raw.Null[SegHeader](),
         lists: [raw.Null[PageMeta](); 32], mags: raw.Null[Mag](), empty: 0, over: raw.Atomic[u32].New(0),
-        idle_head: raw.Null[SegHeader](), idle_tail: raw.Null[SegHeader]())
+        idle_head: raw.Null[SegHeader](), idle_tail: raw.Null[SegHeader](), spare: raw.Atomic[int].New(0))
     Assert(hs.lists.Len() == 32)
     // A power-of-two class is aligned to its size; every align up to 4 KiB
     // is honoured.
@@ -64,8 +65,8 @@ test "RT-HeapHuge a block over 1 MiB is its own reservation" {
         raw.Write(raw.Offset(p, n - 1), 2)
         Assert(raw.Read(p) == 1 && raw.Read(raw.Offset(p, n - 1)) == 2)
     }
+    Assert(HeapUsable(p, 8) == (3 << 20) + PageBytes)
     Assert(HeapResize(p, n, (3 << 20) + PageBytes, 8))
-    Assert(!HeapResize(p, n, (3 << 20) + PageBytes + 1, 8))
     HeapFree(p, n, 8)
     // align 4 MiB and above: the header sits just below the block.
     for align in [SegBytes, 8 << 20] {
@@ -74,6 +75,60 @@ test "RT-HeapHuge a block over 1 MiB is its own reservation" {
         Assert(raw.Addr(q) % Trunc[uint](align) == 0)
         Assert(HeapResize(q, 100, 4096, align))
         HeapFree(q, 100, align)
+    }
+}
+
+test "RT-HeapHugeGrow a huge block grows in place by committing its reservation" (env: &System) {
+    // The reservation spans HugeSpare times the first pages (lead and
+    // capacity): growing past the capacity commits more of it, keeps the
+    // bytes, and reads zero in the new part; one byte past the reservation
+    // is refused and changes nothing.
+    // Where the address space is limited the budget is 0 (RT-HeapHugeBudget
+    // covers that), so there is nothing to grow into.
+    if sys.AddressLimited() {
+        env.Print("skip: the address space is limited (RLIMIT_AS), so huge blocks reserve no spare\n", ()) else {}
+        return
+    }
+    n := (3 << 20) + 100
+    p := HeapAlloc(n, 8)
+    c := HeapUsable(p, 8)
+    Assert(c == (3 << 20) + PageBytes)
+    limit := HugeSpare * (c + PageBytes) - PageBytes
+    unsafe "p is a block of c bytes, then of each size HeapResize grants" {
+        raw.Write(p, 7)
+        raw.Write(raw.Offset(p, n - 1), 9)
+        Assert(HeapResize(p, n, c + 1, 8))
+        Assert(HeapUsable(p, 8) == c + PageBytes)
+        Assert(raw.Read(raw.Offset(p, c)) == 0)
+        Assert(HeapResize(p, c + 1, 8 * c, 8))
+        Assert(HeapUsable(p, 8) == 8 * c)
+        Assert(raw.Read(p) == 7 && raw.Read(raw.Offset(p, n - 1)) == 9)
+        Assert(raw.Read(raw.Offset(p, 8 * c - 1)) == 0)
+        raw.Write(raw.Offset(p, 8 * c - 1), 5)
+        Assert(!HeapResize(p, 8 * c, limit + 1, 8))
+        Assert(HeapUsable(p, 8) == 8 * c)
+        Assert(HeapResize(p, 8 * c, limit, 8))
+        Assert(HeapUsable(p, 8) == limit)
+        raw.Write(raw.Offset(p, limit - 1), 3)
+        Assert(raw.Read(raw.Offset(p, 8 * c - 1)) == 5 && raw.Read(raw.Offset(p, limit - 1)) == 3)
+        // A shrink stays in place and keeps the committed capacity.
+        Assert(HeapResize(p, limit, n, 8))
+        Assert(HeapUsable(p, 8) == limit)
+    }
+    HeapFree(p, n, 8)
+    // align 4 MiB and above: HeaderOf reads the header below the block,
+    // which a growth updates with the one at the reservation's base.
+    for align in [SegBytes, 8 << 20] {
+        q := HeapAlloc(100, align)
+        Assert(HeapUsable(q, align) == PageBytes)
+        Assert(HeapResize(q, 100, 1 << 20, align))
+        Assert(HeapUsable(q, align) == 1 << 20)
+        unsafe "q is a block of 1 MiB now" {
+            raw.Write(raw.Offset(q, (1 << 20) - 1), 1)
+            Assert(raw.Read(raw.Offset(q, (1 << 20) - 1)) == 1)
+        }
+        Assert(!HeapResize(q, 1 << 20, HugeSpare * (align + PageBytes) - align + 1, align))
+        HeapFree(q, 1 << 20, align)
     }
 }
 
@@ -167,7 +222,7 @@ test "RT-Heap-SmallClassOf the fast path's class equals ClassIndex for every sma
 MtCache(): HeapState {
     return HeapState(lock: raw.Atomic[u32].New(0), segs: raw.Null[SegHeader](), lists: [raw.Null[PageMeta](); 32],
         mags: raw.Null[Mag](), empty: 0, over: raw.Atomic[u32].New(0), idle_head: raw.Null[SegHeader](),
-        idle_tail: raw.Null[SegHeader]())
+        idle_tail: raw.Null[SegHeader](), spare: raw.Atomic[int].New(0))
 }
 
 // MtRelease releases a private cache's one segment, whose blocks are not
@@ -311,5 +366,195 @@ test "RT-Heap-PathEdges every size at the small, large and huge boundaries, and 
                 Assert(HbCheck(size, align))
             }
         }
+    }
+}
+
+// HgModel is a huge block as the RT-HeapHugeGrowModel test models it: its
+// address (null for an empty slot), alignment, size, committed capacity
+// and the most it may grow to, the bytes past its lead that its
+// reservation spans.
+struct HgModel {
+    p: *u8
+    align: int
+    size: int
+    cap: int
+    limit: int
+}
+
+// HgPages is n rounded up to whole 64 KiB pages.
+HgPages(n: int): int {
+    return (n + PageBytes - 1) / PageBytes * PageBytes
+}
+
+// HgTag is the byte a model block holds at offset at, from its slot and
+// the offset, so a byte a growth or a shrink moved or lost shows.
+HgTag(slot: int, at: int): u8 {
+    return Trunc[u8](slot * 31 + (at >> 16) + 1)
+}
+
+// HgMark writes the tags at the first byte of each 64 KiB page of [0, to)
+// of the block at p, and at its last byte.
+HgMark(p: *u8, slot: int, to: int) {
+    var at := 0
+    for at < to {
+        unsafe "[0, to) lies inside the block, which the model knows" {
+            raw.Write(raw.Offset(p, at), HgTag(slot, at))
+        }
+        at += PageBytes
+    }
+    if to > 0 {
+        unsafe "to - 1 is the block's last byte" {
+            raw.Write(raw.Offset(p, to - 1), HgTag(slot, to - 1))
+        }
+    }
+}
+
+// HgCheck reads back the tags HgMark wrote over [0, to), and the last
+// byte's when to is the size it was written with (last).
+HgCheck(p: *u8, slot: int, to: int, last: bool) {
+    var at := 0
+    for at < to {
+        unsafe "[0, to) lies inside the block" {
+            Assert(raw.Read(raw.Offset(p, at)) == HgTag(slot, at))
+        }
+        at += PageBytes
+    }
+    if last && to > 0 {
+        unsafe "to - 1 is the block's last byte" {
+            Assert(raw.Read(raw.Offset(p, to - 1)) == HgTag(slot, to - 1))
+        }
+    }
+}
+
+test "RT-HeapHugeGrowModel random allocations, resizes and frees of huge blocks agree with a model" (env: &System) {
+    // Four slots, 400 seeded steps: allocate a huge block (by size, or by
+    // an alignment past 4 KiB, of 1 MiB, where the lead is 16 pages and
+    // the two headers are apart, or of 4 MiB), resize it to a
+    // random size, now and then just around the end of its reservation,
+    // or free it. The model predicts every resize's answer and the
+    // capacity after it (HeapUsable: the size rounded to pages once it
+    // passes the old one, as the lead is whole pages), and the bytes
+    // written are read back after each resize: a growth keeps them and
+    // reads zero past the old capacity, and a refused one changes nothing.
+    if sys.AddressLimited() {
+        env.Print("skip: the address space is limited (RLIMIT_AS), so huge blocks reserve no spare\n", ()) else {}
+        return
+    }
+    // Every free gives its block's share of the spare budget back, from
+    // the header HeaderOf finds at each alignment.
+    hs := HS()
+    var before := 0
+    unsafe "the RtState page; this test runs on one task" {
+        before = (*hs).spare.Load()
+    }
+    var m: [4]HgModel = [HgModel(p: raw.Null[u8](), align: 8, size: 0, cap: 0, limit: 0); 4]
+    aligns := [8, 8192, 1 << 20, SegBytes]
+    var x: u64 = 0x9E3779B97F4A7C15
+    for _ in 0..400 {
+        x ^= x << 13
+        x ^= x >> 7
+        x ^= x << 17
+        slot := Trunc[int](x & 3)
+        r := Trunc[int]((x >> 8) & 0xFFFF_FFFF)
+        if raw.IsNull(m[slot].p) {
+            align := aligns[(r >> 4) & 3]
+            var size := LargeMax + 1 + (r >> 6) % (512 << 10)
+            if align > 4096 {
+                size = 1 + (r >> 6) % (256 << 10)
+            }
+            p := HeapAlloc(size, align)
+            Assert(Real(p) && raw.Addr(p) % Trunc[uint](align) == 0)
+            var lead := PageBytes
+            if align > lead {
+                lead = align
+            }
+            total := HgPages(lead + size)
+            m[slot] = HgModel(p: p, align: align, size: size, cap: total - lead, limit: HugeSpare * total - lead)
+            Assert(HeapUsable(p, align) == m[slot].cap)
+            HgMark(p, slot, size)
+            continue
+        }
+        b := m[slot]
+        if (r & 7) == 0 {
+            HgCheck(b.p, slot, b.size, true)
+            HeapFree(b.p, b.size, b.align)
+            m[slot].p = raw.Null[u8]()
+            continue
+        }
+        var new := 1 + (r >> 3) % (b.limit / 4)
+        if (r & 7) == 1 {
+            new = 1 + (r >> 3) % b.size
+        } else if (r & 7) == 2 {
+            new = b.limit - PageBytes + (r >> 3) % (2 * PageBytes)
+        }
+        ok := HeapResize(b.p, b.size, new, b.align)
+        Assert(ok == (new <= b.limit))
+        if !ok {
+            Assert(HeapUsable(b.p, b.align) == b.cap)
+            HgCheck(b.p, slot, b.size, true)
+            continue
+        }
+        var cap := b.cap
+        if new > cap {
+            cap = HgPages(new)
+            unsafe "b.cap < new: the first byte the growth committed" {
+                Assert(raw.Read(raw.Offset(b.p, b.cap)) == 0)
+            }
+        }
+        Assert(HeapUsable(b.p, b.align) == cap)
+        if new < b.size {
+            HgCheck(b.p, slot, new, false)
+        } else {
+            HgCheck(b.p, slot, b.size, true)
+        }
+        HgMark(b.p, slot, new)
+        m[slot].size = new
+        m[slot].cap = cap
+    }
+    for i in 0..4 {
+        if !raw.IsNull(m[i].p) {
+            HgCheck(m[i].p, i, m[i].size, true)
+            HeapFree(m[i].p, m[i].size, m[i].align)
+        }
+    }
+    unsafe "the RtState page" {
+        Assert((*hs).spare.Load() == before)
+    }
+}
+
+test "RT-HeapHugeBudget a huge block reserves spare only while the budget lasts, and gives it back" {
+    // The budget as HeapInit left it, then emptied, as for a limited
+    // address space: a block gets no spare, so it cannot grow past its
+    // pages, and its free gives nothing back. With a budget of one block's
+    // spare, the first block takes it all, the second gets none, and the
+    // frees return the budget to where it was.
+    hs := HS()
+    var before := 0
+    unsafe "the RtState page; this test runs on one task" {
+        before = (*hs).spare.Load()
+        (*hs).spare.Store(0)
+    }
+    n := (2 << 20) + 1
+    p := HeapAlloc(n, 8)
+    c := HeapUsable(p, 8)
+    Assert(!HeapResize(p, n, c + 1, 8))
+    HeapFree(p, n, 8)
+    total := c + PageBytes
+    unsafe "the RtState page" {
+        Assert((*hs).spare.Load() == 0)
+        (*hs).spare.Store(total * (HugeSpare - 1))
+    }
+    a := HeapAlloc(n, 8)
+    b := HeapAlloc(n, 8)
+    unsafe "the RtState page" {
+        Assert((*hs).spare.Load() == 0)
+    }
+    Assert(HeapResize(a, n, 2 * c, 8))
+    Assert(!HeapResize(b, n, c + 1, 8))
+    HeapFree(b, n, 8)
+    HeapFree(a, 2 * c, 8)
+    unsafe "the RtState page" {
+        Assert((*hs).spare.Load() == total * (HugeSpare - 1))
+        (*hs).spare.Store(before)
     }
 }

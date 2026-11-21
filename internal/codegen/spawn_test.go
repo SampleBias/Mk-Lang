@@ -360,7 +360,7 @@ func TestSpawnThunkRun(t *testing.T) {
 				}
 				e := newTestEnv()
 				bodies, bodiless, set := spawnBodies(e)
-				ll := emit(t, e, unitOf(e, bodies, bodiless...), target, types.Dev)
+				ll := emit(t, e, cCallable(unitOf(e, bodies, bodiless...)), target, types.Dev) // the harness calls them
 				dir := t.TempDir()
 				osIR, kernel := harnessOS(target)
 				h := osIR + harnessRT + spawnStub(target) + spawnDriver(target)

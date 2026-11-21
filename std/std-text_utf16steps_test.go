@@ -1,5 +1,6 @@
 // Why: text.ToUtf16 converts runs of two- and three-byte scalars with vector
-// steps (Utf8Two16, Utf8Three16 in std/text/utf.mk) whose edges are easy to get wrong.
+// steps (Utf8Two16 in std/text/utf.mk, std.simd.kernel's Utf8To16Step)
+// whose edges are easy to get wrong.
 // What: TestStd_ToUtf16VectorSteps, text.ToUtf16 against unicode/utf16.Encode.
 // How: texts built to cross every step's edges, compared unit for unit by an
 // FNV-1a digest, then text.FromUtf16 back to the input, dev and release.
@@ -51,6 +52,8 @@ func std10Utf16Inputs() []string {
 			}
 		}
 	}
+	// Every sequence of scalar lengths over the 13 bytes Utf8To16Step reads.
+	in = append(in, utf16StepSeqs(&encRng{s: 53})...)
 	rnd := rand.New(rand.NewSource(45))
 	pool := append(append(append([]string{}, two...), three...), breaks...)
 	for k := 0; k < 4000; k++ {
@@ -123,8 +126,9 @@ Nib(c: u8): u8 {
 // every length from 0 to 40, each broken at every position by an ASCII byte,
 // another length, or a four-byte scalar; the same runs at every start offset
 // 0 to 15 behind ASCII; runs that end within the last 16 bytes of the text,
-// where the steps must not run; and 4,000 random mixes of every length to
-// 3,000 bytes.
+// where the steps must not run; every sequence of scalar lengths over the
+// 13 bytes Utf8To16Step reads (utf16StepSeqs); and 4,000 random mixes of
+// every length to 3,000 bytes.
 func TestStd_ToUtf16VectorSteps(t *testing.T) {
 	in := std10Utf16Inputs()
 	var feed bytes.Buffer

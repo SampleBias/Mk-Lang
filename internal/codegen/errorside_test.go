@@ -73,7 +73,7 @@ func TestErrorSideCopy(t *testing.T) {
 				if _, why := hostRunner(target); why != "" {
 					skipRunner(t, why)
 				}
-				ll := emit(t, e, unitOf(e, bodies), target, types.Dev)
+				ll := emit(t, e, cCallable(unitOf(e, bodies)), target, types.Dev) // the harness calls them
 				dir := t.TempDir()
 				osIR, kernel := harnessOS(target)
 				// ViewPay's argument: code of Small at 0, payload 77 at 8.

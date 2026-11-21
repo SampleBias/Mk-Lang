@@ -212,6 +212,10 @@ type Unit struct {
 	// memoized under idxMu; tailsN is len(Funcs)+1 once it is set.
 	tails  map[types.ItemID]bool
 	tailsN int
+	// vals is the Funcs some pack takes the address of (sig.go
+	// valueFns), memoized under idxMu; valsN is len(Funcs)+1 once set.
+	vals  map[int]bool
+	valsN int
 }
 
 // index is u's shared exact index: built on the first call,

@@ -10,7 +10,12 @@
 // fast path, then one fast unrounded scaling (ParseScaled64), and the exact
 // Decimal only when the scaling cannot decide the rounding. Decimal holds up
 // to 800 ASCII digits in a fixed array, so even the slow path allocates
-// nothing.
+// nothing. Up to 19 digit bytes, which fit a u64, both parsers read the
+// digits with nothing counted per byte; ParseInt's digits and ParseFloat's
+// fraction digits go eight at a time where a whole word is digits
+// (IsDigits8, Digits8); longer texts, which may still hold
+// a small value behind leading zeros, take a digit-by-digit reader
+// (ParseIntLong, LongDigits).
 
 import std.raw
 
@@ -32,33 +37,58 @@ export str.ParseInt(self): ParseError!i64 {
     if i == n {
         fail ParseError
     }
+    if n - i > 19 {
+        return try ParseIntLong(b, i, neg)
+    }
     // The magnitude in u64; the limit is 2^63 for a negative value, else
-    // 2^63 - 1.
+    // 2^63 - 1. At most 19 digits are below 10^19 < 2^64, so the digits
+    // never wrap and one test against the limit at the end is enough.
     limit: u64 = if neg { 0x8000000000000000 } else { 0x7FFFFFFFFFFFFFFF }
     var v: u64 = 0
-    if n - i <= 18 {
-        // At most 18 digits are below 10^18 < 2^63: no limit test per digit.
-        for i < n {
-            c := b[i]
-            if c < 0x30 || c > 0x39 {
-                fail ParseError
-            }
-            v = v *% 10 +% u64(c - 0x30)
-            i += 1
+    for n - i >= 8 {
+        w := LoadWord(b, i)
+        if !IsDigits8(w) {
+            fail ParseError
         }
-    } else {
-        for i < n {
-            c := b[i]
-            if c < 0x30 || c > 0x39 {
-                fail ParseError
-            }
-            d := u64(c - 0x30)
-            if v > (limit - d) / 10 {
-                fail ParseError
-            }
-            v = v * 10 + d
-            i += 1
+        v = v *% 100000000 +% Digits8(w)
+        i += 8
+    }
+    for i < n {
+        d := b[i] -% 0x30
+        if d > 9 {
+            fail ParseError
         }
+        v = v *% 10 +% u64(d)
+        i += 1
+    }
+    if v > limit {
+        fail ParseError
+    }
+    if neg {
+        return Trunc[i64](~v +% 1)
+    }
+    return Trunc[i64](v)
+}
+
+// ParseIntLong is str.ParseInt for more than 19 bytes after the sign,
+// from b[start..]: leading zeros may still leave a value that fits, so
+// each digit is tested against the limit.
+ParseIntLong(b: []u8, start: int, neg: bool): ParseError!i64 {
+    n := b.Len()
+    var i := start
+    limit: u64 = if neg { 0x8000000000000000 } else { 0x7FFFFFFFFFFFFFFF }
+    var v: u64 = 0
+    for i < n {
+        c := b[i]
+        if c < 0x30 || c > 0x39 {
+            fail ParseError
+        }
+        d := u64(c - 0x30)
+        if v > (limit - d) / 10 {
+            fail ParseError
+        }
+        v = v * 10 + d
+        i += 1
     }
     if neg {
         return Trunc[i64](~v +% 1)
@@ -88,44 +118,58 @@ export str.ParseFloat(self): ParseError!f64 {
     if i < n && (b[i] | 0x20) >= 0x61 {
         return try ParseFloatWord(b, i, neg)
     }
+    // The digits, then at most one point and more digits, with nothing
+    // counted per byte: up to 19 digit bytes, leading zeros included, fit
+    // mant exactly, and the value is mant * 10^(dp - nd_mant) with dp the
+    // negated count of fraction digits and nd_mant 0. Past 19, mant wraps
+    // here and LongDigits reads the same bytes again with truncation.
+    start := i
     var mant: u64 = 0
-    var nd := 0
-    var nd_mant := 0
-    var dp := 0
-    var saw_dot := false
-    var saw_digits := false
-    var trunc := false
     for i < n {
-        c := b[i]
-        if c == 0x2E {
-            if saw_dot {
-                fail ParseError
-            }
-            saw_dot = true
-            dp = nd
-        } else if c >= 0x30 && c <= 0x39 {
-            saw_digits = true
-            if c == 0x30 && nd == 0 {
-                dp -= 1 // leading zeros
-            } else {
-                nd += 1
-                if nd_mant < 19 {
-                    mant = mant *% 10 +% u64(c - 0x30) // below 10^19: no wrap
-                    nd_mant += 1
-                } else if c != 0x30 {
-                    trunc = true
-                }
-            }
-        } else {
+        d := b[i] -% 0x30
+        if d > 9 {
             break
         }
+        mant = mant *% 10 +% u64(d)
         i += 1
     }
-    if !saw_digits {
+    var nfrac := 0
+    var point := 0
+    if i < n && b[i] == 0x2E {
+        i += 1
+        point = 1
+        fstart := i
+        for n - i >= 8 {
+            w := LoadWord(b, i)
+            if !IsDigits8(w) {
+                break
+            }
+            mant = mant *% 100000000 +% Digits8(w)
+            i += 8
+        }
+        for i < n {
+            d := b[i] -% 0x30
+            if d > 9 {
+                break
+            }
+            mant = mant *% 10 +% u64(d)
+            i += 1
+        }
+        nfrac = i - fstart
+    }
+    ndigits := i - start - point
+    if ndigits == 0 {
         fail ParseError
     }
-    if !saw_dot {
-        dp = nd
+    var dp := -nfrac
+    var nd_mant := 0
+    var trunc := false
+    if ndigits > 19 {
+        ld := LongDigits(b, start, i)
+        mant = ld.mant
+        dp = ld.dp
+        nd_mant = ld.nd_mant
+        trunc = ld.trunc
     }
     if i < n && (b[i] | 0x20) == 0x65 {
         i += 1
@@ -189,13 +233,22 @@ export str.ParseFloat(self): ParseError!f64 {
             return f / pow[-p]
         }
     }
-    r := ParseScaled64(mant, p, sign)
-    if !trunc {
-        if r.over {
-            fail ParseError
-        }
-        return raw.F64From(r.bits)
+    if trunc {
+        return try ParseFloatTrunc(b, mant, p, sign)
     }
+    r := ParseScaled64(mant, p, sign)
+    if r.over {
+        fail ParseError
+    }
+    return raw.F64From(r.bits)
+}
+
+// ParseFloatTrunc is ParseFloat's value for a text b with more than 19
+// significant digits: mant is the first 19 and nonzero digits were cut
+// after them. When mant and mant + 1 scale to the same f64, so does every
+// value between; otherwise the exact Decimal decides.
+ParseFloatTrunc(b: []u8, mant: u64, p: int, sign: u64): ParseError!f64 {
+    r := ParseScaled64(mant, p, sign)
     r1 := ParseScaled64(mant + 1, p, sign)
     if r1.bits == r.bits {
         if r.over {
@@ -210,6 +263,69 @@ export str.ParseFloat(self): ParseError!f64 {
         fail ParseError
     }
     return raw.F64From(db.bits)
+}
+
+// The digits of a float's text with more than 19 of them, read as the
+// first 19 significant digits (mant, nd_mant of them), the place of the
+// point (the value is mant * 10^(dp - nd_mant)) and whether a nonzero
+// digit was cut after them.
+struct ParsedDigits {
+    mant: u64
+    nd_mant: int
+    dp: int
+    trunc: bool
+}
+
+// LongDigits reads b[start..end], which ParseFloat has checked: digits
+// with at most one point. Leading zeros move the point and are not
+// counted as significant.
+LongDigits(b: []u8, start: int, end: int): ParsedDigits {
+    var mant: u64 = 0
+    var nd := 0
+    var nd_mant := 0
+    var dp := 0
+    var saw_dot := false
+    var trunc := false
+    for i in start..end {
+        c := b[i]
+        if c == 0x2E {
+            saw_dot = true
+            dp = nd
+        } else if c == 0x30 && nd == 0 {
+            dp -= 1 // leading zeros
+        } else {
+            nd += 1
+            if nd_mant < 19 {
+                mant = mant *% 10 +% u64(c - 0x30) // below 10^19: no wrap
+                nd_mant += 1
+            } else if c != 0x30 {
+                trunc = true
+            }
+        }
+    }
+    if !saw_dot {
+        dp = nd
+    }
+    return ParsedDigits(mant: mant, nd_mant: nd_mant, dp: dp, trunc: trunc)
+}
+
+// IsDigits8 reports whether each byte of w is an ASCII digit: adding 0x46
+// sets the top bit of a byte from 0x3A to 0xB9, subtracting 0x30 that of a
+// byte below 0x30 or above 0xB9, and neither carries into the next byte
+// while the lower ones are digits.
+IsDigits8(w: u64): bool {
+    return ((w +% 0x4646464646464646) | (w -% 0x3030303030303030)) & 0x8080808080808080 == 0
+}
+
+// Digits8 is the value of the eight ASCII digits in w, the first in the
+// low byte (LoadWord's little-endian order), by pairs, then fours, then
+// all eight.
+Digits8(w: u64): u64 {
+    var v := w -% 0x3030303030303030
+    v = (v *% 10) +% (v >> 8)
+    lo := (v & 0x000000FF000000FF) *% 0x000F424000000064
+    hi := ((v >> 16) & 0x000000FF000000FF) *% 0x0000271000000001
+    return (lo +% hi) >> 32
 }
 
 /// Parses the longest prefix of the text that is a float by

@@ -34,6 +34,7 @@ import std.raw
 | Count and move bits | `Ctz64`, `Clz64`, `Popcount64`, `RotL64` |
 | Wide arithmetic | `Mul128`, `AddCarry64`, `SubBorrow64` |
 | Float encodings | `F64Bits`, `F64From`, `F32Bits`, `F32From`, `SqrtF64` |
+| Choose without a branch | `Select(c, a, b)`, a conditional move for an integer, bool, pointer or record (a float may still branch on x86_64) |
 | Call code at an address | `FnFromAddr[F](addr)` |
 | Panic with a code | `Fail(code, msg)` |
 | AES and SHA instructions | `AesRound`, `AesLastRound`, `Clmul64`, `Sha256Rounds4`, `Sha256Schedule4`, `Sha1Rounds4`, `Sha1NextE`, `Sha1Schedule4` |
@@ -58,7 +59,7 @@ const Package = pkg.Package(
 
 ## Safe and unsafe functions
 
-Taking an address, making a null pointer, testing or comparing pointers, fences, bit counts, wide arithmetic, the float encodings, `IsLinear`, `Fail` and every method of `Atomic` are safe, and so are the AES and SHA functions in a function that has [their CPU feature](#cpu-instructions). The rest need an `unsafe "reason" { }` block: moving or casting a pointer, making one from an integer, reading, writing, copying or viewing memory, and ending a value by hand. Elsewhere the call is E1101. The table is the full list.
+Taking an address, making a null pointer, testing or comparing pointers, fences, bit counts, wide arithmetic, the float encodings, `Select`, `IsLinear`, `Fail` and every method of `Atomic` are safe, and so are the AES and SHA functions in a function that has [their CPU feature](#cpu-instructions). The rest need an `unsafe "reason" { }` block: moving or casting a pointer, making one from an integer, reading, writing, copying or viewing memory, and ending a value by hand. Elsewhere the call is E1101. The table is the full list.
 
 | Safe | Needs `unsafe` |
 |---|---|
@@ -68,6 +69,7 @@ Taking an address, making a null pointer, testing or comparing pointers, fences,
 | `Ctz64`, `Clz64`, `Popcount64`, `RotL64`, `Mul128` | `Slice`, `SliceMut`, `Str` |
 | `AddCarry64`, `SubBorrow64` | `Forget`, `Release`, `HasFree` |
 | `F64Bits`, `F64From`, `F32Bits`, `F32From`, `SqrtF64` | |
+| `Select` | |
 | The AES and SHA functions, [with their CPU feature](#cpu-instructions) | |
 
 What the caller answers for inside the block:
@@ -842,6 +844,21 @@ export Same[T](a: *T, b: *T): bool
 ```
 
 Same reports whether a and b hold the same address. Safe.
+
+### `Select`
+
+```
+export Select[T: Plain](c: bool, a: T, b: T): T
+```
+
+- Flows: The result borrows from a and b.
+
+Select is a when c holds, else b. The compiler is told c is
+unpredictable, so for an integer, bool, pointer or record T the choice
+has no branch on c (a cmov on x86_64, a csel on aarch64), even in a
+loop whose next load depends on it, a binary search's, where the
+backend would otherwise branch; a float T may still branch on x86_64.
+Both a and b are evaluated. Safe.
 
 ### `Sha1NextE`
 

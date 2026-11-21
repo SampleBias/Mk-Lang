@@ -50,6 +50,13 @@ import (
 //   - per member, whether its item ends a `become` or is the direct callee
 //     of one anywhere in the unit (tailbody.go tailItems), which splits a
 //     member with a byval parameter into a wrapper and a $tail body;
+//   - per member and per direct call, in every profile, whether the
+//     function has the internal ABI (sig.go internalABI), which reads its
+//     tailItems bit and whether any pack takes its address (valueFns);
+//   - the entries the pack's import hint calls (importhint.go), which come
+//     from the bodies of callees in other packs and from the tables they
+//     name; walkPackConsts adds the entries' declaration types and their
+//     tail-forward bits;
 //   - every Global row: which pack defines it, relative to p, and Local.
 //
 // It reports false, so the pack is emitted and keyed by its IR as before,
@@ -118,7 +125,8 @@ func PackFacts(u *Unit, p int, env Env, cfg Config, h *source.Hasher) bool {
 		h.Uvarint(uint64(lc.Line))
 		h.Uvarint(uint64(lc.Col))
 	}
-	var dg *fnGen // the tail-forward reader, in every profile
+	var dg *fnGen                          // the tail-forward reader, in every profile
+	ag := newPackGen(u, p, env, &cfg, nil) // the internal-ABI reader (sig.go), in every profile
 	h.Uvarint(uint64(len(u.Packs[p])))
 	for _, fi := range u.Packs[p] {
 		f := &u.Funcs[fi]
@@ -131,6 +139,7 @@ func PackFacts(u *Unit, p int, env Env, cfg Config, h *source.Hasher) bool {
 		h.Bool(f.Spawned)
 		h.Bool(f.Local)
 		h.Bool(u.tailItems()[f.Item]) // split by tailbody.go: another pack's become reaches it
+		h.Bool(ag.internalABI(fi))    // its own lowering, which other packs' consts and fn values move
 		h.Bool(sc != nil && sc.outside[f.Item])
 		h.Bool(sg != nil && sg.smallFn(fi))
 		h.Bool(sg != nil && sg.crossSole(fi))
@@ -159,7 +168,12 @@ func PackFacts(u *Unit, p int, env Env, cfg Config, h *source.Hasher) bool {
 						dg = &fnGen{g: newPackGen(u, p, env, &cfg, nil)}
 					}
 					dg.f, dg.fi, dg.b = f, fi, b
-					h.Uvarint(tailForwards(u.Funcs[dg.callIndex(t)].Body))
+					j := dg.callIndex(t)
+					h.Uvarint(tailForwards(u.Funcs[j].Body))
+					// Whether the callee has the internal ABI (sig.go),
+					// which reads its tailItems bit: a `become` in
+					// another pack's body changes it.
+					h.Bool(dg.g.internalABI(j))
 				}
 			}
 			if sc != nil && isCall(t) && t.Callee.Kind == mir.CallDirect {
@@ -176,6 +190,7 @@ func PackFacts(u *Unit, p int, env Env, cfg Config, h *source.Hasher) bool {
 				fx := sg.smallFx(j)
 				h.Uvarint(uint64(fx.ops))
 				h.Bool(fx.loops)
+				h.Bool(sg.smallLoops(j))
 			}
 		}
 	}
@@ -183,6 +198,13 @@ func PackFacts(u *Unit, p int, env Env, cfg Config, h *source.Hasher) bool {
 	// the pack names: its declaration's readonly marks (immutarg.go).
 	h.String("tail-forward refs")
 	fg := newPackGen(u, p, env, &cfg, nil)
+	// The import hint's entries (importhint.go), read from the bodies of
+	// other packs' functions and of the consts they name.
+	hints := fg.importHints()
+	h.Uvarint(uint64(len(hints)))
+	for _, e := range hints {
+		h.String(u.Funcs[e].Symbol)
+	}
 	walkPackConsts(u, p, env, cfg, func(types.TypeID) {}, func(f types.FnRef) {
 		if fi, ok := fg.findFunc(f.Item, f.Args); ok {
 			h.Uvarint(tailForwards(u.Funcs[fi].Body))
@@ -339,6 +361,15 @@ func walkPackConsts(u *Unit, p int, env Env, cfg Config, visit func(types.TypeID
 					}
 				}
 			}
+		}
+	}
+	// The entries the pack's import hint declares and calls (importhint.go),
+	// as a function relocation's.
+	for _, e := range g.importHints() {
+		f := types.FnRef{Item: g.u.Funcs[e].Item, Args: g.u.Funcs[e].Args}
+		g.relocFnTypes(f, ty)
+		if fnRef != nil {
+			fnRef(f)
 		}
 	}
 }

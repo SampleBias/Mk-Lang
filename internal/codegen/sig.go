@@ -1,9 +1,11 @@
-// Why: every Mk function has the platform C ABI, so any non-generic
-// function is a C function pointer; its LLVM signature must match what
-// clang would give the equivalent C declaration, plus the facts Mk's types
-// guarantee.
+// Why: a Mk function has the platform C ABI wherever C can reach it, so
+// any non-generic function value is a C function pointer; its LLVM
+// signature must match what clang would give the equivalent C
+// declaration, plus the facts Mk's types guarantee. A function only Mk
+// direct calls reach may differ where that is faster (internalABI).
 //
-// What: lsig and lowerSig (an ABI classification as an LLVM signature),
+// What: lsig, lowerSig and lowerSigInternal (an ABI classification as an
+// LLVM signature), internalABI,
 // sigKey, partTypes, paramFacts, retFacts, pointeeFacts, fnAttrs, cpuAttrs
 // and tuneCPU, and funcSig.
 //
@@ -42,14 +44,28 @@ type lsig struct {
 	variadic bool
 }
 
-// lowerSig lowers a Mk signature for the build's target; memoized per pack
-// by its types.
+// lowerSig lowers a Mk signature for the build's target under its C ABI;
+// memoized per pack by its types.
 func (g *packGen) lowerSig(params []types.TypeID, fixed int, variadic bool, result types.TypeID) *lsig {
 	key := sigKey(params, fixed, variadic, result)
 	if s, ok := g.sigs[key]; ok {
 		return s
 	}
-	s := abi.Lower(g.tt, g.env.Layout, g.cfg.Target, params, fixed, variadic, result)
+	return g.lowerFrom(key, abi.Lower(g.tt, g.env.Layout, g.cfg.Target, params, fixed, variadic, result), params, result)
+}
+
+// lowerSigInternal lowers the signature of a function only Mk direct calls
+// reach (internalABI) under abi.LowerInternal; memoized beside lowerSig's.
+func (g *packGen) lowerSigInternal(params []types.TypeID, result types.TypeID) *lsig {
+	key := "i" + sigKey(params, len(params), false, result)
+	if s, ok := g.sigs[key]; ok {
+		return s
+	}
+	return g.lowerFrom(key, abi.LowerInternal(g.tt, g.env.Layout, g.cfg.Target, params, result), params, result)
+}
+
+// lowerFrom builds and memoizes under key the lsig of abi signature s.
+func (g *packGen) lowerFrom(key string, s abi.Sig, params []types.TypeID, result types.TypeID) *lsig {
 	ls := &lsig{s: s, params: params, result: result, variadic: s.Variadic}
 	m := g.m
 	switch s.Ret.Kind {
@@ -148,8 +164,9 @@ func sigKey(params []types.TypeID, fixed int, variadic bool, result types.TypeID
 
 // partTypes is the LLVM type of each part of a Direct slot: a scalar
 // travels as its SSA type; a part is ptr when it is exactly one pointer leaf
-// (System V eightbytes, aarch64 arguments; never on Win64, never in an
-// aarch64 result), else iN, float, double or <2 x float>.
+// (System V eightbytes, aarch64 arguments, Win64's two-part slots of
+// abi.LowerInternal; never a Win64 C ABI part, never in an aarch64
+// result), else iN, float, double or <2 x float>.
 func (g *packGen) partTypes(t types.TypeID, sl abi.Slot, result bool) []llvm.Type {
 	m := g.m
 	if r := g.reprOf(t); r.kind == rScalar && len(sl.Parts) == 1 {
@@ -166,7 +183,7 @@ func (g *packGen) partTypes(t types.TypeID, sl abi.Slot, result bool) []llvm.Typ
 			out[i] = m.Float()
 		case p.Class == types.RegFloat:
 			out[i] = m.Double()
-		case p.Bytes == 8 && g.pointerPart(t, off, result):
+		case p.Bytes == 8 && g.pointerPart(t, off, result, len(sl.Parts) > 1):
 			out[i] = m.Ptr()
 		default:
 			out[i] = m.I(8 * int(p.Bytes))
@@ -176,10 +193,12 @@ func (g *packGen) partTypes(t types.TypeID, sl abi.Slot, result bool) []llvm.Typ
 }
 
 // pointerPart reports whether the 8 bytes of t at off are one pointer leaf,
-// where the target's ABI spells such a part ptr.
-func (g *packGen) pointerPart(t types.TypeID, off uint64, result bool) bool {
+// where the target's ABI spells such a part ptr. On Win64 a C ABI Direct
+// slot has one part, an internal one (abi.LowerInternal) two: only the
+// latter, which no C code sees, spells a pointer ptr.
+func (g *packGen) pointerPart(t types.TypeID, off uint64, result, pair bool) bool {
 	tg := g.cfg.Target
-	if tg.OS == types.OSWindows || tg.Arch == types.ArchArm64 && result {
+	if tg.OS == types.OSWindows && !pair || tg.Arch == types.ArchArm64 && result {
 		return false
 	}
 	return g.ptrLeafAt(t, off)
@@ -327,4 +346,66 @@ func tuneCPU(cpu string) string {
 func (g *packGen) funcSig(ls *lsig, linkage llvm.Linkage, vis llvm.Visibility, dsoLocal bool, attrs llvm.Attrs) llvm.FuncSig {
 	return llvm.FuncSig{Linkage: linkage, Visibility: vis, DSOLocal: dsoLocal, Ret: ls.ret, RetAttrs: ls.rattrs,
 		Params: ls.ltypes, ParamAttrs: ls.lattrs, Variadic: ls.variadic, FnAttrs: attrs}
+}
+
+// internalABI reports whether Funcs[fi] is declared, defined and called
+// under abi.LowerInternal: on x86_64 Windows without --debug (cdb and
+// WinDbg read a parameter of more than 8 bytes as a pointer, as MSVC
+// passes it, so they would show a register pair wrongly), a Mk function with a body that
+// only Mk direct calls reach, each of which lowers it by funcSigOf as its
+// definition does. Never an extern or export extern (C names), a function
+// whose address is taken (a fn value, asm sym operand, const or export
+// root: C may call it), a spawned one (its thunk), a naked or section
+// function, one on a `become` edge (a musttail call needs the caller's
+// lowering, which a fn value's may not be), Main (the support pack calls
+// it by its C ABI), std.task.Start (the entry stub's) or one codegen calls
+// by its key (codegenCalled, std.task's FromC pair), and none whose address
+// some pack's IR takes (valueFns), whatever AddrTaken says. Every input is
+// in the unit digest or, for tailItems and valueFns, in PackFacts per
+// member and per direct call.
+func (g *packGen) internalABI(fi int) bool {
+	tg := g.cfg.Target
+	if tg.Arch != types.ArchX64 || tg.OS != types.OSWindows || g.cfg.Debug {
+		return false
+	}
+	f := &g.u.Funcs[fi]
+	if f.Body == nil || f.AddrTaken || f.Spawned || g.isExtern(f) || g.nakedFn(f) || g.funcSection(f.Item) != "" ||
+		f.Symbol == symTaskStartHook || g.codegenCalled(fi) || g.u.tailItems()[f.Item] || g.valueFns()[fi] {
+		return false
+	}
+	switch k := g.items.Get(f.Item).Key; {
+	case k == keyFromCNeeded || k == keyRunFromC, k == types.ItemKey(g.cfg.RootModule, "Main"), !g.cfg.Main.IsZero() && k == g.cfg.Main:
+		return false
+	}
+	return true
+}
+
+// valueFns is the set of Funcs whose address some pack's IR takes: every
+// function a const reloc, an RvFnRef or an asm sym operand of any pack
+// names (walkPackConsts, the walk PackFacts keys a pack's relocs by).
+// mono marks most of them AddrTaken, but not all: a section const or var
+// is emitted whether or not a body reads it, and an IoTable entry no body
+// reads waits in mono unmarked while a direct call brings its function in.
+// Memoized under idxMu while Funcs keeps its length.
+func (g *packGen) valueFns() map[int]bool {
+	u := g.u
+	u.idxMu.Lock()
+	if u.valsN == len(u.Funcs)+1 {
+		s := u.vals
+		u.idxMu.Unlock()
+		return s
+	}
+	u.idxMu.Unlock()
+	s := map[int]bool{}
+	for p := range u.Packs {
+		walkPackConsts(u, p, g.env, *g.cfg, func(types.TypeID) {}, func(f types.FnRef) {
+			if fi, ok := g.findFunc(f.Item, f.Args); ok {
+				s[fi] = true
+			}
+		})
+	}
+	u.idxMu.Lock()
+	u.vals, u.valsN = s, len(u.Funcs)+1
+	u.idxMu.Unlock()
+	return s
 }

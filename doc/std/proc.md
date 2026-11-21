@@ -78,6 +78,7 @@ Any other combination is `Os(0)`.
 - Every handle std opens is close-on-exec, so a child gets only what its `Command` gives it. `Spawn` duplicates what it is lent into the child, and the parent keeps its own end. Close a lent write end before reading the read end, or the read never sees the end of input.
 - A `Pipe` stream is an OS pipe on both targets, so the child can open it again by name (`/dev/stdin`, `/proc/self/fd/0` on Linux).
 - A write to a pipe whose read ends are all closed is `Os(32)` on Linux and `Os(232)` on Windows.
+- A pipe made by `proc.Pipe` holds 64 KiB that nobody has read yet on Windows, as a Linux pipe does by default; a `WriteAll` waits for the reader only past that.
 - `Wait` reads no pipe. Read each of the child's pipes while it runs, or a child that fills a pipe blocks forever. A child that reads its input to the end waits forever while you keep its `stdin` open.
 - `Wait` consumes the child only when it returns a `Status`. On `Canceled` or any other error you still own the child: wait again, `Kill` it and then `Wait`, or `Detach` it.
 - `Status.code` is the exit code: 0 to 255 on Linux, the 32-bit exit code on Windows. It is `none` exactly when a signal ended the child (Linux), and `Status.signal` then names the signal when `Signal` has a member for it. A child ended by `Kill` is SIGKILL on Linux, so both fields are `none`; on Windows it exits with code 1.

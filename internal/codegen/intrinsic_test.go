@@ -193,6 +193,7 @@ func TestIntrinsicsCompile(t *testing.T) {
 			sw := e.stdFn("std.task", "", "Switch", 0, []types.TypeID{pI64, pI64}, types.Void)
 			sys := e.stdFn("std.sys", "", "Syscall", 0, []types.TypeID{types.Uint, types.Uint, types.Uint, types.Uint, types.Uint, types.Uint, types.Uint}, types.Int)
 			fail := e.stdFn("std.raw", "", "Fail", 0, []types.TypeID{types.U32, types.Str}, types.Never)
+			sel := e.stdFn("std.raw", "", "Select", 1, []types.TypeID{types.Bool, p0, p0}, p0)
 			ti := []types.GenericArg{types.TypeArg(types.I64)}
 			f := e.body(e.fn("UseRaw", []types.TypeID{pI64, types.U64, types.F64}, types.I64, 0))
 			q := f.call(off, ti, pI64, mir.Copy(place(1)), mir.Imm(types.Int, 3))
@@ -206,7 +207,8 @@ func TestIntrinsicsCompile(t *testing.T) {
 			f.call(add, ti, types.I64, mir.Copy(place(1)), mir.Imm(types.I64, 1))
 			f.call(cas, ti, types.Bool, mir.Copy(place(1)), mir.Imm(types.I64, 1), mir.Imm(types.I64, 2))
 			f.call(sw, nil, types.Void, mir.Copy(place(1)), mir.Copy(place(1)))
-			uses := []types.ItemID{off, read, write, ctz, mul, bits, sp, add, cas, sw, fail}
+			f.call(sel, ti, types.I64, mir.Imm(types.Bool, 1), mir.Copy(place(v)), mir.Imm(types.I64, 7))
+			uses := []types.ItemID{off, read, write, ctz, mul, bits, sp, add, cas, sw, fail, sel}
 			hasSys := target.OS == types.OSLinux || target.OS == types.OSNutshell
 			if hasSys {
 				u := mir.Imm(types.Uint, 0)
@@ -231,6 +233,10 @@ func TestIntrinsicsCompile(t *testing.T) {
 				if !strings.Contains(ll, want) {
 					t.Errorf("no %q in the emitted IR", want)
 				}
+			}
+			if !regexp.MustCompile(`= select i1 [^
+]*, !unpredictable !`).MatchString(ll) {
+				t.Errorf("std.raw.Select is not a select marked !unpredictable")
 			}
 			if sysAsm := `asm sideeffect "syscall", "={rax},{rax},{rdi},{rsi},{rdx},{r10},{r8},{r9},~{rcx},~{r11},~{memory}"(i64 39,`; hasSys && target.Arch == types.ArchX64 && !strings.Contains(ll, sysAsm) {
 				t.Errorf("std.sys.Syscall is not %s", sysAsm)

@@ -50,6 +50,7 @@ func emitPack(u *Unit, p int, env Env, cfg *Config, w io.Writer) (Report, error)
 		// finish first: a var global's initializer may make a wrapper
 		// (an intrinsic as a value), which needs its row.
 		g.finish()
+		g.importHint() // importhint.go: no row, the linker drops it
 		g.funcRows()
 		_, werr = m.WriteTo(w)
 	}); err != nil {

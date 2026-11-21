@@ -1114,3 +1114,46 @@ test "Windows' PATH search of a name holds its sub-arena's first chunk, not a 96
     // on a typical Windows PATH).
     Assert(held < CandBytes)
 }
+
+// On Windows a Pipe holds 64 KiB written ahead of its reader (the size Pipe
+// asks CreatePipe for), so a 32 KiB WriteAll with nobody reading returns at
+// once: under a 2 s deadline it must not be cut, and the reader then gets
+// every byte in order. Elsewhere the capacity is the system's (on Linux a
+// default of 64 KiB, which can be changed; on macOS it grows from 16 KiB),
+// so the block asserts nothing there.
+test "proc.Pipe holds a 32 KiB WriteAll with no reader waiting on Windows, and the reader then gets every byte" (sys: &System) {
+    if !SpWin() {
+        return
+    }
+    io := sys.io
+    (r, w) := Pipe(io).Must()
+    var data: [32768]u8 = [0; 32768]
+    for i in 0..data.Len() {
+        data[i] = Trunc[u8](i * 7)
+    }
+    var wrote := false
+    scope d := io.Scope() {
+        d.CancelAfter(time.Millis(2000))
+        var ok := true
+        w.WriteAll(io, data[..]) else {
+            ok = false
+        }
+        wrote = ok
+    }
+    Assert(wrote)
+    w.Close()
+    var got: [32768]u8 = [0; 32768]
+    var n := 0
+    for {
+        k := r.Read(io, mut got[n..]).Must()
+        if k == 0 {
+            break
+        }
+        n += k
+    }
+    r.Close()
+    Assert(n == data.Len())
+    for i in 0..n {
+        Assert(got[i] == data[i])
+    }
+}

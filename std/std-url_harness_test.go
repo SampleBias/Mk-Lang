@@ -167,6 +167,11 @@ Case(a: &Arena into a, line: str): OutOfMemory!str from a {
             }
             return try a.Fmt("ok {read}", (read))
         }
+        "plain" {
+            // Whether Parse takes x by its one-pass form (ParsePlain).
+            plain := try url.FxPlain(a, try TextOf(a, x))
+            return try a.Fmt("ok {plain}", (plain))
+        }
         "set" {
             u := url.Parse(a, try TextOf(a, x), none) else e {
                 return try a.Fmt("err href {e}", (e))
@@ -277,6 +282,12 @@ export FxParseBaseRead(a: &Arena, input: str into a, base: &Url): Error|OutOfMem
     var read := false
     _ = try ParseWith(a, input, some(base), mut read)
     return read
+}
+
+// FxPlain is whether ParsePlain takes input.
+export FxPlain(a: &Arena, input: str into a): OutOfMemory!bool {
+    u := try ParsePlain(a, input)
+    return u.IsSome()
 }
 
 export FxEncodeSpecialQuery(a: &Arena, s: []u8): OutOfMemory!str from a {

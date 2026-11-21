@@ -209,8 +209,16 @@ test "RT-File-Route iocp and io_uring attach a disk file, epoll and the pool swi
 // which only the stream ones move the stream position (an attached handle's
 // rule, and Linux pread's; the Windows pool path's ReadFile with an offset
 // also moves the file pointer, so kind 2 is not run there). Every 40 steps
-// the file is reopened truncated. Lengths 0 to 699, offsets 0 to 7,999, so
-// writes leave holes that read as zeros.
+// the file is removed and made again, empty. Lengths 0 to 699, offsets 0 to
+// 7,999, so writes leave holes that read as zeros.
+//
+// Removed and made again, not reopened truncated: on Windows hosts measured
+// here, a file truncated by CREATE_ALWAYS soon after its previous handle
+// closed, then written past its old extent, can read the truncated bytes
+// back in its holes. A plain Win32 program with no Mk code shows it with
+// the same calls and sequences: every wrong byte is the previous contents'
+// at its offset (7 of 12 runs of 80 files on one volume), and none showed in
+// 24 runs with a delete and a fresh create instead.
 FlModel(io: Io, tag: str, k: int, seed: u64, kind: int, steps: int) {
     var nb: [256]u8 = [0; 256]
     name := FlName(mut nb, tag, k)
@@ -225,6 +233,7 @@ FlModel(io: Io, tag: str, k: int, seed: u64, kind: int, steps: int) {
     for step in 0..steps {
         if step > 0 && step % 40 == 0 {
             Assert(NativeClose(io, h).err == core.SysErr.None)
+            Assert(NativeRemove(io, name).err == core.SysErr.None)
             o = NativeOpen(io, name, 1)
             Assert(o.err == core.SysErr.None)
             h = Trunc[uint](o.value)

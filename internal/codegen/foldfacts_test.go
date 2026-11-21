@@ -148,7 +148,7 @@ func TestFoldRespectsFacts(t *testing.T) {
 			}
 			e := newTestEnv()
 			d := foldUnit(e)
-			ll := emit(t, e, d.u, target, types.Release)
+			ll := emit(t, e, cCallable(d.u), target, types.Release) // the harness calls IsNone
 			dir := t.TempDir()
 			osIR, kernel := harnessOS(target)
 			call := "  %r = call i64 @mk.main.IsNone(ptr @xs, i64 1)\n"

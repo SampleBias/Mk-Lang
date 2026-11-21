@@ -219,7 +219,7 @@ func TestClobberABIMaskRegisters(t *testing.T) {
 			f.asmBody(mir.Asm{Template: "call {" + strconv.Itoa(len(ops)) + "}", ClobberABI: "C", Operands: append(ops,
 				mir.AsmOperand{Kind: mir.AsmSym, Sym: fn})}, f.at(2, 1))
 			f.ret(f.at(3, 1))
-			ll := emit(t, e, unitOf(e, []*mir.Body{f.b}), tc.target, types.Release)
+			ll := emit(t, e, cCallable(unitOf(e, []*mir.Body{f.b})), tc.target, types.Release) // sym: AddrTaken
 			text := fnText(ll, "mk.main.K")
 			if tc.none {
 				if strings.Contains(text, "{k") {
@@ -267,7 +267,7 @@ func TestSymOperand(t *testing.T) {
 				}}, f.at(2, 1))
 			f.assign(place(0), use(mir.Copy(place(r))), f.at(3, 1))
 			f.ret(f.at(3, 1))
-			u := unitOf(e, []*mir.Body{h.b, f.b})
+			u := cCallable(unitOf(e, []*mir.Body{h.b, f.b})) // sym: AddrTaken
 			u.Globals = []Global{{Item: v, Pack: 0}, {Item: x, Pack: 0}}
 			ll := emit(t, e, u, target, types.Release)
 			text := fnText(ll, "mk.main.Jump")

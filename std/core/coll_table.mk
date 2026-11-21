@@ -83,7 +83,8 @@ H2(hash: u64): u8 {
 }
 
 // HashOf is k's fold hash, the hash of every table New makes:
-// NewHasher, k.Hash, HashFinish. A str key takes FoldStr and every
+// NewHasher, k.Hash, HashFinish. A str key takes FoldStr, a TextMap's
+// TextKey FoldStr of its text (TextKeyFold in coll_heap.mk), and every
 // integer key, char and bool FoldU64K, the same values in straight line
 // (the value their Hash impl in core_impls.mk gives: U64 of the value,
 // sign-extended for signed types, a char's scalar, a bool's 0 or 1), as
@@ -93,6 +94,9 @@ H2(hash: u64): u8 {
 HashOf[K: Hash](k: &K): u64 {
     if K is str {
         return FoldStr[K](*k)
+    }
+    if K is TextKey {
+        return TextKeyFold[K](k)
     }
     if K is int {
         return FoldU64K[K](Trunc[u64](i64(*k)))
@@ -160,6 +164,9 @@ TableHash[K: Hash, V](t: &Table[K, V], k: &K): u64 {
 HashKeyed[K: Hash](k0: u64, k1: u64, k: &K): u64 {
     if K is str {
         return SipStrKeyed(k0, k1, *k)
+    }
+    if K is TextKey {
+        return SipStrKeyed(k0, k1, TextKeyStr[K](k))
     }
     if K is int {
         return SipU64K[K](k0, k1, Trunc[u64](i64(*k)))
@@ -245,17 +252,23 @@ SipU64K[K](k0: u64, k1: u64, x: u64): u64 {
 // KeyEq is a.Eq(b), the comparison of every probe. A str key compares
 // eight bytes at a time (StrEq), the value str's Eq impl gives, because
 // str's == lowers to the support pack's memcmp, which reads one byte per
-// step.
+// step; a TextKey compares its two words first (TextKeyEq).
 KeyEq[K: Eq](a: &K, b: &K): bool {
     if K is str {
         return StrEq[K](*a, *b)
+    }
+    if K is TextKey {
+        return TextKeyEq[K](a, b)
     }
     return a.Eq(b)
 }
 
 // StrEq is a == b: the lengths, then the words of a and b, the last one
 // overlapping the one before when the length is not a multiple of 8; under
-// 8 bytes the fixed loads of FoldStr's short read, compared in place. The
+// 8 bytes the fixed loads of FoldStr's short read, compared in place. Over
+// 16 bytes, where the loop would run, two views of the same bytes are equal
+// with no read (as Zig's mem.eql): a lookup by the very view stored, as
+// when keys are views of one buffer, skips the compare. The
 // index arithmetic wraps because 0 <= i < n holds, so it never does.
 // Generic over the key type only, so it is instantiated, and can be
 // inlined, in the caller's pack (FoldU64K).
@@ -265,6 +278,9 @@ StrEq[K](a: str, b: str): bool {
         return false
     }
     if n >= 8 {
+        if n > 16 && raw.Same(raw.StrData(a), raw.StrData(b)) {
+            return true
+        }
         var i := 0
         for n -% i > 8 {
             if LoadU64(a, i) != LoadU64(b, i) {

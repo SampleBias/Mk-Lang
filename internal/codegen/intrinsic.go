@@ -40,7 +40,7 @@ var intrinsicKeys = []string{
 	"std.raw.F64From", "std.raw.Fail", "std.raw.Fence", "std.raw.FenceOrd", "std.raw.Fill", "std.raw.Forget", "std.raw.FromAddr",
 	"std.raw.HasFree", "std.raw.IsLinear", "std.raw.IsNull", "std.raw.Move", "std.raw.Mul128", "std.raw.Null", "std.raw.Of",
 	"std.raw.OfMut", "std.raw.Offset", "std.raw.Popcount64", "std.raw.PtrCast", "std.raw.Read",
-	"std.raw.ReadUnaligned", "std.raw.Release", "std.raw.RotL64", "std.raw.Same", "std.raw.Slice", "std.raw.SliceMut",
+	"std.raw.ReadUnaligned", "std.raw.Release", "std.raw.RotL64", "std.raw.Same", "std.raw.Select", "std.raw.Slice", "std.raw.SliceMut",
 	"std.raw.SqrtF64", "std.raw.Str", "std.raw.StrData", "std.raw.Write",
 	"std.rt.CallMain", "std.rt.ErrorName", "std.rt.FramePointer", "std.rt.FramePointers", "std.rt.FuncTable", "std.rt.ProfileTable", "std.rt.StackPointer", "std.rt.UsesTasks",
 	"std.sys.Clone", "std.sys.LibcBuild", "std.sys.Restorer", "std.sys.Syscall", "std.sys.Teb", "std.sys.TrapEntry",
@@ -78,7 +78,7 @@ var intrinsicSigs = map[string]string{
 	"std.raw.Mul128": "(u64, u64): (hi: u64, lo: u64)", "std.raw.Null": "[T](): *T", "std.raw.Of": "[T](&T): *T",
 	"std.raw.OfMut": "[T](mut T): *T", "std.raw.Offset": "[T](*T, int): *T", "std.raw.Popcount64": "(u64): int",
 	"std.raw.PtrCast": "[T, U](*T): *U", "std.raw.Read": "[T](*T): T", "std.raw.ReadUnaligned": "[T: Plain](*T): T",
-	"std.raw.RotL64": "(u64, int): u64", "std.raw.Same": "[T](*T, *T): bool", "std.raw.Slice": "[T](*T, int): []T",
+	"std.raw.RotL64": "(u64, int): u64", "std.raw.Same": "[T](*T, *T): bool", "std.raw.Select": "[T: Plain](bool, T, T): T", "std.raw.Slice": "[T](*T, int): []T",
 	"std.raw.SliceMut": "[T](*T, int): mut []T", "std.raw.SqrtF64": "(f64): f64", "std.raw.Str": "(*u8, int): str",
 	"std.raw.StrData": "(str): *u8", "std.raw.Write": "[T](*T, T)",
 	"std.rt.CallMain": "(&System): MainResult", "std.rt.ErrorName": "(u32): str", "std.rt.FuncTable": "(): []FuncRow",
@@ -378,6 +378,8 @@ func (fg *fnGen) intrinsicCall(item types.ItemID, t *mir.Terminator, args []valu
 		ret(fg.cur.Cast(llvm.BitCast, args[0].v, g.reprOf(destT).ssa))
 	case "std.raw.SqrtF64":
 		ret(fg.cur.CallFunc(m.IntrinsicFn("sqrt", m.Double()), []llvm.Value{args[0].v}))
+	case "std.raw.Select":
+		fg.selectUnpredictable(t, args, destT)
 	case "std.raw.Atomic:New":
 		d, _ := fg.placeAddr(t.Dest)
 		fg.store(d, args[0])

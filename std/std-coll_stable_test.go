@@ -1,8 +1,9 @@
 // Why: SortStable, SortStableIn and Search are called from user code, so their
 // order and cost must hold through check's Slice routing too.
-// What: TestStdColl_StableSortMatchesGo over core_sort.mk and coll_sort.mk.
-// How: less counts against the Go models (blkRunModel), order against
-// slices.SortStableFunc, Search against sort.Search; also at compile time.
+// What: TestStdColl_StableSortMatchesGo over core_drift.mk and coll_sort.mk.
+// How: less counts against the Go models (driftRunModel), order against
+// slices.SortStableFunc, Search against sort.Search and its loop's call
+// count (searchModel); also at compile time.
 
 package std
 
@@ -158,12 +159,12 @@ const CompiledIn = DigestIn(EvalArena())
 // goStable sorts (key, id) pairs by key with the Go models of SortStable
 // and SortStableIn, for their less calls, and with slices.SortStableFunc,
 // for the order, which both models must give; then for each query
-// sort.Search's index over the sorted keys, counting predicate calls.
+// Search's index over the sorted keys by searchModel (which must agree with
+// sort.Search), counting less calls.
 func goStable(t *testing.T, keys, queries []int) string {
 	xs := blkWant(keys)
-	// P is 24 bytes (two ints and a reference), so SortStable's cache
-	// holds 170 of them.
-	m, mi := blkRunModel(keys, false, blkCacheCap(24, 8)), blkRunModel(keys, true, 0)
+	// P is 24 bytes (two ints and a reference), which sets the scratch.
+	m, mi := driftRunModel(keys, false, 24), driftRunModel(keys, true, 24)
 	ids := make([]int, len(xs))
 	for i, x := range xs {
 		ids[i] = x.id
@@ -175,11 +176,31 @@ func goStable(t *testing.T, keys, queries []int) string {
 	fmt.Fprintf(&b, "%d %d %d true", m.cmps, mi.cmps, idDigest(ids))
 	sc := 0
 	for _, q := range queries {
-		i := sort.Search(len(xs), func(h int) bool { sc++; return !(xs[h].k < q) })
+		i := searchModel(len(xs), func(h int) bool { sc++; return xs[h].k < q })
+		if w := sort.Search(len(xs), func(h int) bool { return !(xs[h].k < q) }); i != w {
+			t.Fatalf("searchModel gives %d for %d, sort.Search %d", i, q, w)
+		}
 		fmt.Fprintf(&b, " %d", i)
 	}
 	fmt.Fprintf(&b, " / %d\n", sc)
 	return b.String()
+}
+
+// searchModel is Slice[T].Search's loop (core_sort.mk) over n elements,
+// where less(h) is less of element h and the key: the answer lies in
+// i..i + n, each step asks of element i + ceil(n/2) - 1 and halves n
+// whatever less answers, so it makes bits.Len(n) calls, and on a
+// partitioned slice it returns sort.Search's index.
+func searchModel(n int, less func(h int) bool) int {
+	i := 0
+	for n > 0 {
+		h := n - n>>1
+		if less(i + h - 1) {
+			i += h
+		}
+		n >>= 1
+	}
+	return i
 }
 
 type byKeyCount struct {
@@ -210,12 +231,13 @@ func stableQueries(keys []int) []int {
 // and by a capturing literal) and Slice[T].SortStableIn, called from user
 // code. Over every pattern of sortCases (and every length 0 to 70) the number
 // of less calls of SortStable and of SortStableIn equals their Go models'
-// (blkRunModel, std-coll_blockmerge_model_test.go) on the same input, and the
+// (driftRunModel, std-coll_drift_model_test.go) on the same input, and the
 // order of the ids equals slices.SortStableFunc's (a stable order is unique,
 // so this is also the stability check). SortStable on a List with a capturing
 // literal gives the same count and order. Search, with an int key over P
-// elements (K differs from T), gives sort.Search's index with the same number
-// of less calls for keys present, absent, below the first and above the last.
+// elements (K differs from T), gives sort.Search's index with searchModel's
+// number of less calls for keys present, absent, below the first and above
+// the last.
 // The same sorts and search run at compile time (a const, SortStableIn over
 // EvalArena's allocator) give the native result.
 func TestStdColl_StableSortMatchesGo(t *testing.T) {

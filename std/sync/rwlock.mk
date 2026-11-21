@@ -150,25 +150,53 @@ RwClear(rs: &raw.Atomic[u32], bits: u32) {
 /// 1. O(1) besides the wait; allocates nothing.
 export RwLock[T].LockRead(&self, io: Io): Canceled!ReadGuard[T] {
     // The cancellation point's fast test inline (core.CancelClear: a native
-    // Io while no scope is cancelled), so such a call pays no call for it.
-    if !core.CancelClear(io) {
-        try core.SyncCancel(io)
-    }
-    rs := &self.rs
+    // Io while no scope is cancelled); when it fails, RwReadSlow makes the
+    // full check first, then the Add.
+    //
     // Fast path, as Go's RLock: one fetch-and-add, which never fails and
     // never retries (a Load and Cas loop would retry once for every reader
     // that changed the count in between, one more cache-line round trip
-    // each). Acquire edge: the Add that reads W
+    // each), then one test: W clear and the count not already full (W is
+    // the top bit, the count the low 30). Acquire edge: the Add that reads W
     // clear reads the RMW chain on rs from the slow reader that cleared W
-    // under the mutex, so the last writer's critical section happens
-    // before this reader's reads.
-    old := rs.Add(1)
-    if (old & RwW) == 0 {
-        if (old & RwCount) == RwCount {
-            RwExit(rs, io)
-            raw.Fail(1, "RwLock: too many readers")
+    // under the mutex, so the last writer's critical section happens before
+    // this reader's reads. Otherwise RwReadSlow goes on from what the Add
+    // read.
+    if core.CancelClear(io) {
+        old := self.rs.Add(1)
+        if (old & (RwW | RwCount)) < RwCount {
+            return ReadGuard[T](l: raw.Of(self), io: io)
         }
-        return ReadGuard[T](l: raw.Of(self), io: io)
+        try RwReadSlow(self, io, old, true)
+    } else {
+        try RwReadSlow(self, io, 0, false)
+    }
+    return ReadGuard[T](l: raw.Of(self), io: io)
+}
+
+// RwReadSlow is LockRead past its fast path, out of line so that the fast
+// path (the cancellation test, the Add and one test of what it read) is
+// small enough to inline into a caller's loop. added says LockRead's Add was
+// made and read old0 (W set or a full count); else the cancellation test
+// failed, and the full check and the Add are made here. It returns holding
+// a read count, or panics, or fails Canceled holding none. Both of
+// LockRead's branches call it, so it is not a callee whose one call the
+// release build's small-function rule counts into LockRead's size.
+RwReadSlow[T](l: &RwLock[T], io: Io, old0: u32, added: bool): Canceled!void {
+    rs := &l.rs
+    var old := old0
+    if !added {
+        try core.SyncCancel(io)
+        // Acquire edge: as LockRead's Add.
+        old = rs.Add(1)
+        if (old & (RwW | RwCount)) < RwCount {
+            return
+        }
+    }
+    if (old & RwW) == 0 {
+        // The count was full: this Add carried into P.
+        RwExit(rs, io)
+        raw.Fail(1, "RwLock: too many readers")
     }
     // W is set: this reader is not in. It takes its count back as a
     // reader's exit does, so when that takes the count to 0 with P set
@@ -176,7 +204,7 @@ export RwLock[T].LockRead(&self, io: Io): Canceled!ReadGuard[T] {
     // returned a ReadGuard.
     RwExit(rs, io)
     // A writer holds the mutex, waits for it, or held it last: queue on it.
-    g := try self.m.Lock(io)
+    g := try l.m.Lock(io)
     for {
         // Edge: the Cas from a value with W and P stale is the reader's acquire
         // of the count (RW1).
@@ -191,7 +219,6 @@ export RwLock[T].LockRead(&self, io: Io): Canceled!ReadGuard[T] {
         }
     }
     g.Unlock()
-    return ReadGuard[T](l: raw.Of(self), io: io)
 }
 
 /// The value. It takes the RwLock by value, so no guard can be holding it.

@@ -276,33 +276,44 @@ test "TextMap over a Counting over a Fixed: Live and Bytes after each step, zero
     _ = m.Ensure(c.Alloc(), "alpha", 1) else {
         Assert(false)
     }
-    // The key's copy and the table's arrays.
+    // The table's arrays: a key of up to 15 bytes is kept in its slot.
     l1 := c.Live()
     b1 := c.Bytes()
-    Assert(l1 >= 2 && b1 >= 5)
+    Assert(l1 >= 2 && b1 > 0)
     _ = m.Ensure(c.Alloc(), "beta", 2) else {
         Assert(false)
     }
-    Assert(c.Live() == l1 + 1 && c.Bytes() == b1 + 4)
+    Assert(c.Live() == l1 && c.Bytes() == b1)
+    // A key of 16 bytes or more is copied, once.
+    long := "a sixteen-byte k"
+    _ = m.Ensure(c.Alloc(), long, 5) else {
+        Assert(false)
+    }
+    Assert(c.Live() == l1 + 1 && c.Bytes() == b1 + 16)
     // A present key copies nothing.
     _ = m.Ensure(c.Alloc(), "beta", 3) else {
         Assert(false)
     }
-    Assert(c.Live() == l1 + 1 && c.Bytes() == b1 + 4 && m.Len() == 2)
+    _ = m.Ensure(c.Alloc(), long, 6) else {
+        Assert(false)
+    }
+    Assert(c.Live() == l1 + 1 && c.Bytes() == b1 + 16 && m.Len() == 3)
+    Assert(m.Remove(c.Alloc(), long).Must() == 5)
+    Assert(c.Live() == l1 && c.Bytes() == b1 && m.Len() == 2)
     _ = m.Remove(c.Alloc(), "alpha")
-    Assert(c.Live() == l1 && c.Bytes() == b1 - 1 && m.Len() == 1)
+    Assert(c.Live() == l1 && c.Bytes() == b1 && m.Len() == 1)
     // The empty key has no copy.
     _ = m.Ensure(c.Alloc(), "", 4) else {
         Assert(false)
     }
-    Assert(c.Live() == l1 && c.Bytes() == b1 - 1 && m.Len() == 2)
+    Assert(c.Live() == l1 && c.Bytes() == b1 && m.Len() == 2)
     if v := m.Get("beta") {
         Assert(*v == 2)
     } else {
         Assert(false)
     }
     m.Free(c.Alloc())
-    Assert(c.Live() == 0 && c.Bytes() == 0 && c.Peak() >= b1 + 4)
+    Assert(c.Live() == 0 && c.Bytes() == 0 && c.Peak() >= b1 + 16)
 }
 
 // TmFillMap sets i to i * 3 from 0 up in a HeapMap over a, until a Set is

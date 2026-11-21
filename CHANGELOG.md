@@ -2,6 +2,28 @@
 
 Every user-visible change to Mk, newest first. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow [Semantic Versioning](https://semver.org/). What a 0.x release may change, at each stability level, is in [stability](doc/std/README.md#9-stability).
 
+## Unreleased
+
+### Standard library
+
+- `raw.Select(c, a, b)` is `a` when `c` holds, else `b`: the compiler is told `c` is unpredictable, so for an integer, bool, pointer or record the choice is a conditional move even in a loop whose next load depends on it; a float may still branch on x86_64.
+- `Slice.Search` is faster on random keys over a large slice: its loop runs a trip count fixed by the length and picks each half by `raw.Select`, so a probe costs no misprediction. It returns the same index as before on a sorted slice, duplicates included, and makes at most ceil(log2(n + 1)) calls of `less`, as documented.
+
+### Changed
+
+- On Windows a `proc.Pipe` holds 64 KiB unread, as a Linux pipe does by default, instead of one page, so a writer waits for the reader less often.
+- `SortStable` now allocates: past 20 elements it merges through scratch memory of `Len() / 2` elements or more (the whole slice up to 8,000,000 bytes), on the stack when that fits in 4,096 bytes and the element is aligned to at most 8, and from the process heap otherwise, freed before it returns. It is Rust's driftsort. When its scratch is larger than the stack's, it falls back to the in-place block merge sort it replaces if the heap is out of memory, at compile time and in a freestanding program. The result is the same: a stable order is unique. `SortStableIn` sorts the same way, with its `Len() / 2` elements of scratch from its allocator, as before.
+- `TextMap` keeps a key of up to 15 bytes inside its table instead of copying it into memory from the allocator: such a key costs no allocation, and `Remove` and `Free` have no copy of it to give back. Keys of 16 bytes or more are copied as before. Hashes, iteration order, results and the allocator checks (code 12) are unchanged.
+- `hash.Crc32` and `Crc32State` fold 256 bytes at a time with VPCLMULQDQ on 512-bit registers on x86_64 CPUs with AVX-512 and VPCLMULQDQ, from 256 bytes of input; other CPUs keep the 128-bit fold or the table. The checksums are unchanged.
+- A heap block over 1 MiB (a growing `HeapList`, `HeapText` or map buffer, or C `realloc` through `std.libc`) grows in place instead of moving: its reservation spans up to 16 times its first pages (at most 16 GiB more per block, 64 GiB for all blocks together), and growth commits more of it. A list that doubles from a huge block's first size grows in place four times before it moves, instead of copying its elements and touching fresh pages at each growth; once the 64 GiB budget is spent, new blocks reserve no spare and move as before. Virtual size grows with it, also for requests aligned over 4 KiB (100 bytes at an alignment of 8 KiB reserve 2 MiB). On Linux, where `RLIMIT_AS` is finite (`ulimit -v`) when the program starts (it is read once, at heap start), a block reserves only its own pages. On Linux such a block is two mappings, one more against `vm.max_map_count`.
+
+### Performance
+
+- `str.Find`, `str.Has`, `str.Split` and `str.Replace` search for a needle of two bytes or more with a vector prefilter: two bytes of the needle (rare ones on a long text) are compared at 16 starts a step (32 where the CPU has AVX2) and each hit is verified; when near misses make verification stop paying, the search goes on with Two-Way, so it stays linear. Results are unchanged.
+- `text.ToUtf16` converts any mix of one- to three-byte scalars up to twelve bytes a step (one table lookup and one byte shuffle), not only runs of one length; mixed-script text no longer goes a scalar at a time.
+- `Encoding.Encode` to UTF-16LE and UTF-16BE (`encoding.Utf16Le`, `encoding.Utf16Be`) takes the same steps: sixteen ASCII bytes, or up to twelve bytes of any mix of one- to three-byte scalars, a vector step.
+- `x86_64-windows`: outside `--debug`, a Mk function that only Mk calls directly takes and returns a value of 9 to 16 bytes made of integers and pointers (a slice, a `str`, a `?int`) in two registers instead of through memory. `extern` and `export extern` functions, functions used as values (tables and `dyn` included), `asm` `sym` operands, functions a `become` reaches, `naked` functions and functions with a `section` clause keep the platform C ABI; a plain Mk symbol, `export` ones included, is not callable by name from C or assembly.
+
 ## 0.2.1 (2026-11-20)
 
 ### Platforms

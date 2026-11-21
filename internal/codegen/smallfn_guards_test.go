@@ -271,6 +271,69 @@ func TestPackFactsCalleeLoop(t *testing.T) {
 	}
 }
 
+// pfBodyLoopUnit is TestPackFactsCalleeBodyLoop's unit: pack 0 holds Outer,
+// whose loop calls the thin M, which calls J once; pack 1 holds the thin J,
+// which calls Y and Z once each, Z (not thin) calling the looping Q. Y
+// has a loop when loop is set, at the same operation count.
+func pfBodyLoopUnit(t *testing.T, e *testEnv, loop bool) *Unit {
+	n := smallOps + 8
+	if loop {
+		n -= 6 // countLoop adds three statements and three terminators
+	}
+	y, yb := soleLeaf(e, "Y", n, loop)
+	if got := bodyOps(yb.b); got != smallOps+9 {
+		t.Fatalf("Y (loop %v) has %d operations, want %d", loop, got, smallOps+9)
+	}
+	q, qb := soleLeaf(e, "Q", 1, true)
+	z := soleCaller(e, "Z", q, false, thinCallerBlocks)
+	j := e.body(e.fn("J", []types.TypeID{types.Int}, types.Int, 0))
+	v := j.call(y, nil, types.Int, mir.Copy(place(1)))
+	w := j.call(z.item, nil, types.Int, mir.Copy(place(v)))
+	j.assign(place(0), use(mir.Copy(place(w))), j.at(6, 3))
+	j.ret(j.at(7, 3))
+	m := soleCaller(e, "M", j.item, false, 0)
+	o := soleCaller(e, "Outer", m.item, true, 0)
+	u := unitOf(e, []*mir.Body{o.b, m.b, j.b, yb.b, z.b, qb.b})
+	u.Packs = [][]int{{0, 1}, {2, 3, 4, 5}}
+	for i := 2; i < 6; i++ {
+		u.Funcs[i].Pack = 1
+	}
+	return u
+}
+
+// TestPackFactsCalleeBodyLoop: a loop that ends up in a marked callee's
+// body (smallSet.loops) can move alone. J, in pack 1, keeps its operation
+// count, its effect's loop (Z counts Q's) and its cross-pack mark when Y
+// gains a loop, but J is thin, so Y's loop now ends up in J, M carries it,
+// and Outer's loop loses its call mark of M: pack 0's facts must move.
+func TestPackFactsCalleeBodyLoop(t *testing.T) {
+	cfg := Config{Target: types.X86_64Windows, Profile: types.Release}
+	e0, e1 := newTestEnv(), newTestEnv()
+	u0, u1 := pfBodyLoopUnit(t, e0, false), pfBodyLoopUnit(t, e1, true)
+	for i, c := range []struct {
+		e *testEnv
+		u *Unit
+	}{{e0, u0}, {e1, u1}} {
+		if p1 := emitCfg(t, c.e, c.u, 1, cfg); !smallMarked(t, p1, "J") {
+			t.Fatalf("unit %d: J lacks the cross-pack mark: %s", i, defLine(p1, "mk.main.J"))
+		}
+	}
+	if !soleMarked(t, emitCfg(t, e0, u0, 0, cfg), "Outer", "M") {
+		t.Error("loop-free Y: Outer's call of M is not marked")
+	}
+	if soleMarked(t, emitCfg(t, e1, u1, 0, cfg), "Outer", "M") {
+		t.Error("looping Y: Outer's call of M is marked")
+	}
+	h0, ok0 := pfHash(u0, 0, e0, cfg)
+	h1, ok1 := pfHash(u1, 0, e1, cfg)
+	if !ok0 || !ok1 {
+		t.Fatal("PackFacts refused a release configuration")
+	}
+	if h0 == h1 {
+		t.Error("Y's loop in pack 1 changed pack 0's IR but not its facts")
+	}
+}
+
 // TestSmallSetFollowsAppendedFuncs: a unit extended
 // between emissions (codegen.go's idxN rule) recomputes its small set, so
 // a small function appended after the first emission is marked, not read

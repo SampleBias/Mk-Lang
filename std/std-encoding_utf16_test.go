@@ -1,11 +1,16 @@
 // Why: utf16.mk decodes UTF-16 by vector blocks (eight units with no surrogate, written as UTF-8 by
-// two 16-byte shuffles while 32 output bytes remain), and that path must equal the scalar one.
-// What: every mix of one-, two- and three-byte scalars in blocks, every input length, and Decoder.Push split at every byte.
+// two 16-byte shuffles while 32 output bytes remain), and encodes it by vector steps too
+// (std.simd.kernel's Utf8To16Step);
+// both paths must equal the scalar ones.
+// What: every mix of one-, two- and three-byte scalars in blocks, every input length, and Decoder.Push
+// split at every byte (TestStdEncoding_Utf16Blocks); every mix of one- to four-byte scalars encoded
+// (TestStdEncoding_Utf16EncodeBlocks).
 // How: the WHATWG model is the oracle, as in TestStdEncoding_DecodeAdversarial.
 
 package std
 
 import (
+	"strings"
 	"testing"
 	"unicode/utf16"
 )
@@ -105,4 +110,89 @@ func TestStdEncoding_Utf16Blocks(t *testing.T) {
 		cases = append(cases, decCase(m, long), decsCase(m, long))
 	}
 	encRunAll(t, cases)
+}
+
+// encScalars is n scalars as UTF-8, drawn by kind: "1" ASCII, "2" U+0080 to
+// U+07FF, "3" U+0800 to U+FFFF outside the surrogates, "4" U+10000 and up.
+func encScalars(r *encRng, n int, kinds string) string {
+	var sb strings.Builder
+	for k := 0; k < n; k++ {
+		switch kinds[r.intn(len(kinds))] {
+		case '1':
+			sb.WriteByte(byte(r.intn(0x80)))
+		case '2':
+			sb.WriteRune(rune(0x80 + r.intn(0x780)))
+		case '3':
+			c := 0x800 + r.intn(0xF800)
+			if c >= 0xD800 && c <= 0xDFFF {
+				c = 0xFFFF - (c - 0xD800)
+			}
+			sb.WriteRune(rune(c))
+		case '4':
+			sb.WriteRune(rune(0x10000 + r.intn(0x100000)))
+		}
+	}
+	return sb.String()
+}
+
+// TestStdEncoding_Utf16EncodeBlocks: Encode to UTF-16LE and BE writes
+// sixteen ASCII bytes, or up to twelve bytes of any mix of one- to
+// three-byte scalars, a vector step (std.simd.kernel's Utf8To16Step), and that path
+// must equal the scalar one. Every length from 0 to 60 scalars of each mix,
+// so the last 16 bytes of input and of output fall at every offset of a
+// step, every sequence of scalar lengths that covers a step's 13 bytes
+// (utf16StepSeqs), and 3,000 long texts of every mix, against the WHATWG
+// model.
+func TestStdEncoding_Utf16EncodeBlocks(t *testing.T) {
+	models := encModels(t)
+	byName := map[string]encModel{}
+	for _, m := range models {
+		byName[m.name] = m
+	}
+	r := &encRng{s: 47}
+	var cases []encCase
+	mixes := []string{"1", "2", "3", "12", "13", "23", "123", "1123", "1234", "124", "34", "11112", "11113"}
+	for _, name := range []string{"UTF-16LE", "UTF-16BE"} {
+		m := byName[name]
+		for _, kinds := range mixes {
+			for n := 0; n <= 60; n++ {
+				cases = append(cases, encTextCase(m, encScalars(r, n, kinds)))
+			}
+		}
+		for _, s := range utf16StepSeqs(r) {
+			cases = append(cases, encTextCase(m, s))
+		}
+		for k := 0; k < 1500; k++ {
+			kinds := mixes[r.intn(len(mixes))]
+			cases = append(cases, encTextCase(m, encScalars(r, r.intn(16), "1")+encScalars(r, 16+r.intn(200), kinds)))
+		}
+	}
+	encRunAll(t, cases)
+}
+
+// utf16StepSeqs is every sequence of scalar lengths 1 to 4 that covers the
+// first 13 bytes of a vector step (the step reads the leads of bytes 0 to
+// 12), each as text: 16 ASCII bytes, the scalars (drawn by r), 16 ASCII
+// bytes. So every 12-bit mask a valid text can show is met.
+func utf16StepSeqs(r *encRng) []string {
+	kinds := "1234"
+	var out []string
+	var walk func(seq []byte, sum int)
+	walk = func(seq []byte, sum int) {
+		if sum >= 13 {
+			var sb strings.Builder
+			sb.WriteString("0123456789abcdef")
+			for _, k := range seq {
+				sb.WriteString(encScalars(r, 1, string(k)))
+			}
+			sb.WriteString("ghijklmnopqrstuv")
+			out = append(out, sb.String())
+			return
+		}
+		for z := 1; z <= 4; z++ {
+			walk(append(seq, kinds[z-1]), sum+z)
+		}
+	}
+	walk(nil, 0)
+	return out
 }

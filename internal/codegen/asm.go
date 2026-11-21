@@ -238,7 +238,11 @@ func (g *packGen) asmSymbol(item types.ItemID, at source.Span) string {
 	it := g.items.Get(item)
 	switch d := it.Decl.(type) {
 	case *types.FuncDecl:
-		fn := g.funcDecl(g.funcIndex(item, nil))
+		fi := g.funcIndex(item, nil)
+		if g.internalABI(fi) {
+			source.ICEf(at, "codegen: asm names %s, which has the internal ABI (not AddrTaken)", g.u.Funcs[fi].Symbol)
+		}
+		fn := g.funcDecl(fi)
 		g.m.Used(g.m.FuncRef(fn))
 		return fn.Name()
 	case *types.GlobalDecl:

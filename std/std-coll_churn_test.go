@@ -98,7 +98,7 @@ CollLru.Free(self, a: &Alloc) {
 // cookbook Lru of capacity 100 over n accesses. Prints the capacities, the
 // largest live count and the peak bytes, and the live bytes after each
 // container is freed.
-export CollFixChurn(w: mut Writer, a: &Alloc, n: int, window: int): OutOfMemory|WriteError!void {
+export CollFixChurn(w: mut Writer, a: &Alloc, n: int, window: int, klen: int): OutOfMemory|WriteError!void {
     var c1 := CollCount(inner: raw.Of(a), live: 0, peak: 0)
     var c2 := CollCount(inner: raw.Of(a), live: 0, peak: 0)
     var c3 := CollCount(inner: raw.Of(a), live: 0, peak: 0)
@@ -173,15 +173,16 @@ export CollFixChurn(w: mut Writer, a: &Alloc, n: int, window: int): OutOfMemory|
         p3 := b3.peak
         l3 := b3.live
         try Print(w, "lru hits {hits} peak {p3} after {l3}\n", (hits, p3, l3))
-        // TextMap: the same churn with 8-byte keys, each copied into the
-        // heap on insert and freed on remove.
+        // TextMap: the same churn with keys of klen digits: 8 stay in their
+        // slots; 16 are each copied into the heap on insert and freed on
+        // remove.
         a4 := h4.Alloc()
         var tm := TextMap[int].New(a4)
-        var buf: [8]u8 = [0; 8]
+        var buf: [16]u8 = [0; 16]
         max_len = 0
         max_cap = 0
         for i in 0..n {
-            k := CollKey(mut buf, i)
+            k := CollKey(mut buf, i, klen)
             _ = tm.Ensure(a4, k, i) else {
                 tm.Free(a4)
                 fail OutOfMemory
@@ -189,7 +190,7 @@ export CollFixChurn(w: mut Writer, a: &Alloc, n: int, window: int): OutOfMemory|
             max_len = IntMax(max_len, tm.Len())
             max_cap = IntMax(max_cap, tm.t.cap)
             if i >= window {
-                old := CollKey(mut buf, i - window)
+                old := CollKey(mut buf, i - window, klen)
                 _ = tm.Remove(a4, old)
             }
         }
@@ -202,33 +203,34 @@ export CollFixChurn(w: mut Writer, a: &Alloc, n: int, window: int): OutOfMemory|
     }
 }
 
-// CollKey writes i as 8 decimal digits into buf and returns them as a str
-// over buf (valid until buf is written again).
-CollKey(buf: mut [8]u8, i: int): str {
+// CollKey writes i as klen <= 16 decimal digits into buf and returns them
+// as a str over buf (valid until buf is written again).
+CollKey(buf: mut [16]u8, i: int, klen: int): str {
     var x := i
-    var j := 7
+    var j := klen - 1
     for j >= 0 {
         buf[j] = Trunc[u8](48 + x % 10)
         x /= 10
         j -= 1
     }
-    return StrOf(raw.Data(buf[..]), 8)
+    return StrOf(raw.Data(buf[..]), klen)
 }
 `
 
 const collChurnModule = `import std.core
 
-export Churn(w: mut Writer, a: &Alloc, n: int, window: int): OutOfMemory|WriteError!void {
-    try core.CollFixChurn(w, a, n, window)
+export Churn(w: mut Writer, a: &Alloc, n: int, window: int, klen: int): OutOfMemory|WriteError!void {
+    try core.CollFixChurn(w, a, n, window, klen)
 }
 `
 
 // TestStdColl_ChurnBounded: a Map over an Arena and a HeapMap, each over
 // a counting heap, take n inserts each followed, window keys later, by its
 // remove; then the cookbook Lru (capacity 100) takes n seeded accesses over
-// 300 keys; then a TextMap takes the Map's churn with 8-byte keys, whose
-// copies it allocates and frees (its heap peak may also hold the live keys'
-// bytes). The bounds: capacity stays below max(8, 32 L / 7) for a largest
+// 300 keys; then a TextMap takes the Map's churn with 8-digit keys, which
+// it keeps in its slots, and with 16-digit keys, whose copies it allocates
+// and frees (its heap peak may also hold the live keys' bytes); each of the
+// 24 lines runs at both key lengths. The bounds: capacity stays below max(8, 32 L / 7) for a largest
 // length L; at a window of 1 the capacity is 8 and every peak is under 64 KiB;
 // a heap table's peak is its arrays plus the half-size arrays it grew from; an
 // arena's peak is at most 4 times its arrays (abandoned arrays total less than
@@ -241,9 +243,11 @@ func TestStdColl_ChurnBounded(t *testing.T) {
 export Main(sys: &System): OutOfMemory|WriteError!void {
     var out := sys.Stdout()
     a := sys.heap.Alloc()
-    for n in [100000, 1000000] {
-        for window in [1, 50, 1000] {
-            try collchurn.Churn(mut out, a, n, window)
+    for klen in [8, 16] {
+        for n in [100000, 1000000] {
+            for window in [1, 50, 1000] {
+                try collchurn.Churn(mut out, a, n, window, klen)
+            }
         }
     }
 }
@@ -251,13 +255,14 @@ export Main(sys: &System): OutOfMemory|WriteError!void {
 	extra := map[string]string{"core/tests_collchurn.mk": collChurnCore, "collchurn/collchurn.mk": collChurnModule}
 	got := collExec(t, collBuildWith(t, extra, src, "--release"))
 	lines := strings.Split(strings.TrimSpace(got), "\n")
-	if len(lines) != 24 {
-		t.Fatalf("%d lines, want 24:\n%s", len(lines), got)
+	if len(lines) != 48 {
+		t.Fatalf("%d lines, want 48:\n%s", len(lines), got)
 	}
 	arrays := func(c int) int { return c*17 + 8 }     // ctrl (cap + 8) and 16-byte slots of Table[int, int]
-	textArrays := func(c int) int { return c*25 + 8 } // ctrl and 24-byte slots of Table[str, int]
+	textArrays := func(c int) int { return c*25 + 8 } // ctrl and 24-byte slots of Table[TextKey, int]
 	for i, l := range lines {
 		window := []int{1, 50, 1000}[i/4%3]
+		klen := []int{8, 16}[i/24]
 		var kind string
 		var capNow, maxCap, maxLen, peak, after, hits int
 		switch i % 4 {
@@ -280,8 +285,8 @@ export Main(sys: &System): OutOfMemory|WriteError!void {
 			if kind == "map" && peak > 4*arrays(maxCap)+4096 {
 				t.Errorf("%q: arena peak %d above 4 times the arrays (%d) plus a first chunk", l, peak, arrays(maxCap))
 			}
-			if kind == "textmap" && peak > textArrays(maxCap)+textArrays(maxCap/2)+8*maxLen {
-				t.Errorf("%q: heap peak %d above arrays %d plus the half-size arrays %d plus %d key bytes", l, peak, textArrays(maxCap), textArrays(maxCap/2), 8*maxLen)
+			if kind == "textmap" && peak > textArrays(maxCap)+textArrays(maxCap/2)+klen*maxLen {
+				t.Errorf("%q: heap peak %d above arrays %d plus the half-size arrays %d plus %d key bytes", l, peak, textArrays(maxCap), textArrays(maxCap/2), klen*maxLen)
 			}
 		case 2:
 			if _, err := fmt.Sscanf(l, "lru hits %d peak %d after %d", &hits, &peak, &after); err != nil {
@@ -294,7 +299,7 @@ export Main(sys: &System): OutOfMemory|WriteError!void {
 		if after != 0 {
 			t.Errorf("%q: %d bytes live after Free", l, after)
 		}
-		if i >= 12 {
+		if i%24 >= 12 {
 			small := strings.Fields(lines[i-12])
 			large := strings.Fields(l)
 			for k := range large {

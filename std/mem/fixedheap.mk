@@ -265,7 +265,11 @@ FhFormat(h: &FixedHeap) {
 
 // The granule numbers and byte offsets below lie inside the buffer, under
 // 2^34, so the wrapping operators in the list and block helpers are exact;
-// they are used to keep overflow branches out of every request.
+// they are used to keep overflow branches out of every request. For the
+// same reason a first level f (under fls, at most 28: a map is a u32) is
+// masked to 5 bits where it is a shift count, which changes no value and
+// keeps the shift check's panic, and the frame it needs, out of the
+// helpers.
 
 // FhPut makes the n granules at g one free block: its size with FhFree,
 // the prev of the block after it, and its place at the head of its list.
@@ -288,7 +292,7 @@ FhPut(h: &FixedHeap, g: int, n: int) {
     f := i >> 4
     sp := 4 +% (f << 2)
     FhW(b, sp, FhR(b, sp) | (1 << (i & 15)))
-    FhW(b, 0, FhR(b, 0) | (1 << f))
+    FhW(b, 0, FhR(b, 0) | (1 << (f & 31)))
 }
 
 // FhEmpty clears the bit of list i, which just lost its last block, and
@@ -300,7 +304,7 @@ FhEmpty(h: &FixedHeap, i: int) {
     m := FhR(b, sp) & ~(1 << (i & 15))
     FhW(b, sp, m)
     if m == 0 {
-        FhW(b, 0, FhR(b, 0) & ~(1 << f))
+        FhW(b, 0, FhR(b, 0) & ~(1 << (f & 31)))
     }
 }
 
@@ -338,7 +342,7 @@ FhTake(h: &FixedHeap, i: int): int {
     }
     var m := FhR(b, 4 +% (f << 2)) & (-1 << (i & 15))
     if m == 0 {
-        fm := FhR(b, 0) & (-1 << (f +% 1))
+        fm := FhR(b, 0) & (-1 << ((f +% 1) & 31))
         if fm == 0 {
             return 0
         }
@@ -441,16 +445,20 @@ FixedHeapAllocEntry(ctx: *u8, size: int, align: int): *u8 {
 // block (H4), so the payload moves up one alignment further: the gap is 0,
 // or 2 granules or more, and at most the alignment plus one.
 FhAllocWide(h: &FixedHeap, size: int, align: int): *u8 {
-    if Trunc[uint](size) > Trunc[uint](h.max) || align < 16 || align > MaxAlign || (align & (align - 1)) != 0 {
+    if Trunc[uint](size) > Trunc[uint](h.max) || align < 16 || align > MaxAlign || (align & (align -% 1)) != 0 {
         return raw.Null[u8]()
     }
-    var need := (size + 15) >> 3
+    // Past the compare, size <= max (under 2^34) and align <= 2^30, and
+    // every granule count below lies in the buffer, so the wrapping
+    // operators are exact (and keep panic paths out of the entry this
+    // inlines into).
+    var need := (size +% 15) >> 3
     if need < 2 {
         need = 2
     }
     ag := align >> 3
-    want := need + ag + 1
-    if want > h.last - h.first {
+    want := need +% ag +% 1
+    if want > h.last -% h.first {
         return raw.Null[u8]()
     }
     found := FhFind(h, want)
@@ -459,17 +467,17 @@ FhAllocWide(h: &FixedHeap, size: int, align: int): *u8 {
     }
     b := h.base
     var g := found
-    var have := FhR(b, (g << 3) + 4) & FhSize
+    var have := FhR(b, (g << 3) +% 4) & FhSize
     // at is the payload's granule in the address space, gap how far the
     // next aligned one is.
-    at := Trunc[int](raw.Addr(b) >> 3) + g + 1
-    var gap := (0 -% at) & (ag - 1)
+    at := Trunc[int](raw.Addr(b) >> 3) +% g +% 1
+    var gap := (0 -% at) & (ag -% 1)
     if gap == 1 {
-        gap += ag
+        gap = gap +% ag
     }
     if gap != 0 {
-        g += gap
-        have -= gap
+        g = g +% gap
+        have = have -% gap
         FhPut(h, found, gap)
     }
     FhCarve(h, g, have, need)

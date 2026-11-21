@@ -92,3 +92,51 @@ test "HeapMap.Replace refused by the allocator changes nothing" {
     m.Free(c.Alloc())
     Assert(c.Live() == 0)
 }
+
+// ToKeyLen is the length of ToRun's key i: 3, 20, 15 or 16 bytes in turn,
+// so every second key is kept in its slot and every second one copied.
+ToKeyLen(i: int): int {
+    lens: [4]int = [3, 20, 15, 16]
+    return lens[i % 4]
+}
+
+// ToRun sets 40 distinct keys, ToAlpha[i..i + ToKeyLen(i)], into a TextMap
+// over a. A refused Set must change nothing: the count of bytes live at c,
+// the length, and the key still absent. Returns how many Sets were taken;
+// the map is freed.
+ToRun(a: &Alloc, c: &Counting): int {
+    var m := TextMap[int].New(a)
+    var held := 0
+    for i in 0..40 {
+        k := ToAlpha[i..i + ToKeyLen(i)]
+        live := c.Live()
+        m.Set(a, k, i) else {
+            Assert(c.Live() == live && m.Len() == held && m.Get(k).IsNone())
+            continue
+        }
+        held += 1
+        Assert(*m.Get(k).Must() == i)
+    }
+    Assert(m.Len() == held)
+    m.Free(a)
+    return held
+}
+
+test "TextMap.Set refused at each request, short and long keys: nothing changes and nothing leaks" (sys: &System) {
+    c := Counting.New(sys.heap.Alloc())
+    // A run that fails nothing: the 20 copied keys, then the table's two
+    // arrays at capacity 8, 16, 32 and 64. A key of up to 15 bytes asks
+    // for no memory.
+    probe := Failing.New(c.Alloc(), -1)
+    Assert(ToRun(probe.Alloc(), &c) == 40 && probe.Requests() == 20 + 8 && c.Live() == 0)
+    var at := 0
+    for at < 100 {
+        f := Failing.New(c.Alloc(), at)
+        Assert(ToRun(f.Alloc(), &c) >= 39 && c.Live() == 0)
+        if f.Failed() == 0 {
+            break
+        }
+        at += 1
+    }
+    Assert(at == 28)
+}

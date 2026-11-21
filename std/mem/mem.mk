@@ -187,25 +187,29 @@ FixedAllocEntry(ctx: *u8, size: int, align: int): *u8 {
 // granule of padding when used > 0, and used written into its last 8 bytes
 // (the header). off is a multiple of align past base's skew, so the header
 // at off - 8 is 8-aligned, and it lies in [used, off), bytes no block holds.
+// The wrapping operators are exact, and keep panic paths out of the entry
+// this inlines into: used <= size + 7 and size is a real buffer's length,
+// far below 2^62, so lo and off stay under 2^62 + 2^30; off + size <= f.size
+// once the fit compare passes.
 FixedAllocWide(f: &Fixed, size: int, align: int): *u8 {
-    if size < 0 || align < 16 || align > MaxAlign || (align & (align - 1)) != 0 {
+    if size < 0 || align < 16 || align > MaxAlign || (align & (align -% 1)) != 0 {
         return raw.Null[u8]()
     }
     used := f.used.Load()
     var lo := used
     if used != 0 {
-        lo = used + 8
+        lo = used +% 8
     }
-    off := lo + ((0 -% (f.skew +% lo)) & (align - 1))
-    if size > f.size - off {
+    off := lo +% ((0 -% (f.skew +% lo)) & (align -% 1))
+    if size > f.size -% off {
         return raw.Null[u8]()
     }
     if off >= 8 {
         unsafe "used <= off - 8 and off <= f.size: the header slot is free bytes of the buffer, 8-aligned" {
-            raw.Write[int](raw.PtrCast[u8, int](raw.Offset(f.base, off - 8)), used)
+            raw.Write[int](raw.PtrCast[u8, int](raw.Offset(f.base, off -% 8)), used)
         }
     }
-    f.used.Store(Round(off + size))
+    f.used.Store(Round(off +% size))
     unsafe "off + size <= f.size: inside the buffer" {
         return raw.Offset(f.base, off)
     }

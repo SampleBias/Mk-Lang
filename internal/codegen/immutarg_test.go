@@ -59,7 +59,7 @@ func TestImmutIndirectParams(t *testing.T) {
 	cf.callTo(direct(bodies[0].Item), place(0), mir.NoLocal, cf.at(3, 3), mir.Copy(place(1)))
 	cf.ret(cf.at(4, 3))
 	bodies = append(bodies, cf.b)
-	win := emitNoValidate(t, e, unitOf(e, bodies), types.X86_64Windows, types.Release)
+	win := emitNoValidate(t, e, cCallable(unitOf(e, bodies)), types.X86_64Windows, types.Release) // the C ABI
 	for _, r := range rows {
 		if _, got := paramAttrs(t, win, "mk.main.I"+r.name); len(got) != 1 || got[0] != r.win {
 			t.Errorf("Win64 %s: %q, want %q", r.name, got, r.win)

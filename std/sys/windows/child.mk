@@ -136,12 +136,15 @@ const OutNoAutoReturn: u32 = 8
 const ConModeBytes: int = 8
 
 /// Pipe makes an anonymous pipe: value the read end, os the write end,
-/// both synchronous and not inheritable. O(1): one system call.
+/// both synchronous and not inheritable, with a buffer of PipeBytes
+/// (proc.mk's 64 KiB, Linux's default pipe capacity; 0 would give the
+/// system's one page), so a writer can be 64 KiB ahead of the reader before
+/// a write waits for it. O(1): one system call.
 export Pipe(): OsResult {
     var r: uint = 0
     var w: uint = 0
     unsafe "kernel32; r and w are this frame's" {
-        if CreatePipe(raw.OfMut(mut r), raw.OfMut(mut w), raw.Null[u8](), 0) == 0 {
+        if CreatePipe(raw.OfMut(mut r), raw.OfMut(mut w), raw.Null[u8](), PipeBytes) == 0 {
             return LastCall()
         }
     }

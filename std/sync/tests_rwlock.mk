@@ -303,3 +303,66 @@ test "Conc-RwLock RW3 under Sim schedules, seeds 1 to 256" (sys: &System) {
         Assert(l.Into() == 1)
     }
 }
+
+// RwHoldCancelled keeps a cancelled scope alive on its own task until stop
+// is set, so no native cancellation test of the process takes the fast
+// answer (core.CancelClear is false) and every LockRead takes RwReadSlow's
+// full check before its Add.
+RwHoldCancelled(io: Io, on: &atomic.AtomicInt, stop: &atomic.AtomicInt) {
+    scope c := io.Scope() {
+        c.Cancel()
+        on.Store(1)
+        for stop.Load() == 0 {
+            io.NoCancel().Yield() else {}
+        }
+    }
+}
+
+// RW2 with LockRead off its fast path: while another task's scope is
+// cancelled, readers and writers of scopes that are not still keep the pair
+// equal and every write lands once.
+test "Conc-RwLock 4 writers and 8 readers keep the pair equal while another scope is cancelled" (sys: &System) {
+    l := RwLock[RwPair].New(RwPair(a: 0, b: 0))
+    bad := atomic.AtomicInt.New(0)
+    on := atomic.AtomicInt.New(0)
+    stop := atomic.AtomicInt.New(0)
+    var slow := false
+    scope s := sys.io.Scope() {
+        s.go RwHoldCancelled(sys.io, &on, &stop)
+        for on.Load() == 0 {
+            sys.io.Yield() else {}
+        }
+        slow = !core.CancelClear(sys.io)
+        scope w := sys.io.Scope() {
+            for _ in 0..4 {
+                w.go RwWriter(&l, sys.io, 300, &bad)
+            }
+            for _ in 0..8 {
+                w.go RwReader(&l, sys.io, 1000, &bad)
+            }
+        }
+        stop.Store(1)
+    }
+    Assert(slow)
+    Assert(bad.Load() == 0)
+    p := l.Into()
+    Assert(p.a == 1200 && p.b == 1200)
+}
+
+// LockRead's fast path: with no writer ever and no scope cancelled, two
+// readers at once and one after them each take the read lock with the Add
+// alone. std-sync_inline_test.go runs this block over a scratch std in
+// which RwReadSlow panics on entry.
+test "Conc-RwLock readers with no writer and no scope cancelled stay off RwReadSlow" (sys: &System) {
+    l := RwLock[i64].New(5)
+    Assert(core.CancelClear(sys.io))
+    r1 := l.LockRead(sys.io).Must()
+    r2 := l.LockRead(sys.io).Must()
+    Assert(l.rs.Load() == 2 && *r1.Ref() == 5 && *r2.Ref() == 5)
+    r1.Unlock()
+    r2.Unlock()
+    r3 := l.LockRead(sys.io).Must()
+    r3.Unlock()
+    Assert(l.rs.Load() == 0)
+    Assert(l.Into() == 5)
+}

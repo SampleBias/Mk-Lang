@@ -79,7 +79,7 @@ There is no `Or` method for a default: write `x := opt else { v }`.
 
 ## 3. Memory: allocators and arenas
 
-Nothing in Mk allocates behind your back. A function can allocate only if one of its parameters can reach an allocator. `Main` receives two: `sys.arena`, which lives as long as the program, and `sys.heap`.
+Nothing in Mk allocates behind your back, with one exception: `SortStable` takes scratch memory from the process heap and frees it before it returns ([sorting](core.md#sorting-and-searching)). Otherwise a function can allocate only if one of its parameters can reach an allocator. `Main` receives two: `sys.arena`, which lives as long as the program, and `sys.heap`.
 
 **Arenas are the default.** `List`, `Map`, `Set` and `Text` hold a `&Arena`. They need no release: the arena frees everything at once when it ends. A short program never thinks about memory, and a server makes one arena per request.
 
@@ -141,7 +141,7 @@ A heap container takes the allocator at every call that may allocate, and is lin
 | `mem.Counting` | Wraps another allocator, counts bytes and live objects, reports leaks in tests | No | As wrapped | |
 | `mem.Limit` | Wraps another allocator, refuses what would take the live bytes past a limit | No | As wrapped | |
 | `mem.Failing` | Wraps another allocator, fails the requests a test picks, to reach the code that handles `OutOfMemory` | No | As wrapped | |
-| `mem.Null` | Always fails. Proves at run time that a path allocates nothing | No | No | |
+| `mem.Null` | Always fails. Proves at run time that a path allocates nothing through its allocator parameters (`SortStable` takes heap scratch without one) | No | No | |
 
 An `&Alloc` never crosses to another task (E1002). A task that allocates on the heap takes the `&Heap` and calls `Alloc()` itself.
 

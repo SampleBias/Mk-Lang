@@ -4,7 +4,7 @@
 // What: the compiler intrinsics std is written with: pointer operations
 // (Of, OfMut, Addr, FromAddr, Offset, Read, Copy, Move, Fill, Slice),
 // atomics and fences, Clz64, Ctz64, Popcount64, Mul128, the float bit
-// casts, SqrtF64 and others.
+// casts, SqrtF64, Select (a branch-free choice) and others.
 //
 // How: every function here is bodiless, so check marks it an intrinsic;
 // codegen and eval implement each by its stable key. One not marked safe
@@ -191,3 +191,10 @@ export F32Bits(x: f32): u32
 export F32From(x: u32): f32
 /// SqrtF64 is the correctly rounded square root of x. Safe.
 export SqrtF64(x: f64): f64
+/// Select is a when c holds, else b. The compiler is told c is
+/// unpredictable, so for an integer, bool, pointer or record T the choice
+/// has no branch on c (a cmov on x86_64, a csel on aarch64), even in a
+/// loop whose next load depends on it, a binary search's, where the
+/// backend would otherwise branch; a float T may still branch on x86_64.
+/// Both a and b are evaluated. Safe.
+export Select[T: Plain](c: bool, a: T, b: T): T

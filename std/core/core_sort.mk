@@ -1,11 +1,13 @@
-// Why: sorting must be fast on every input shape and allocate nothing; the
-// prelude gives an unstable sort, a stable one and binary search with no
-// allocator in sight.
+// Why: sorting must be fast on every input shape; the prelude gives an
+// unstable sort, a stable one and binary search with no allocator in sight,
+// and the stable sort needs one that allocates nothing for when it has no
+// scratch memory.
 //
-// What: Slice[T].Sort (pdqsort), Slice[T].SortStable (StableSort, a block
-// merge sort) and Slice[T].Search, with their partition, network, insertion,
-// heap and merge helpers. SortStableIn, which merges through allocated
-// scratch memory, is in coll_sort.mk.
+// What: Slice[T].Sort (pdqsort), Slice[T].SortStable, Slice[T].Search and
+// StableSort (a block merge sort), with their partition, network,
+// insertion, heap and merge helpers. SortStable's body, which merges
+// through scratch memory, is core_drift.mk's DriftStable; StableSort is
+// its in-place sort, for when it has none. SortStableIn is in coll_sort.mk.
 //
 // How: Sort is Go's pdqsort_func (Go 1.27, zsortfunc.go): ninther pivots,
 // pattern breaking with a xorshift seeded by the length, heapsort after too
@@ -33,8 +35,9 @@
 // (std-defects_sortmodel_test.go), comparison for comparison. less is a
 // const parameter, so each comparator instantiates and inlines, a capturing
 // literal included; a comparator that needs a context captures it, so there
-// are no With forms. SortStable is WikiSort's in-place block merge sort;
-// Search is Go's sort.Search.
+// are no With forms. StableSort is WikiSort's in-place block merge sort;
+// Search gives Go's sort.Search's index by a loop whose trip count depends
+// only on the length, its probes chosen without a branch.
 //
 // The unsafe blocks move elements by raw reads and writes inside one range
 // that a check before the block holds to s (a raw.Fail, unreachable from
@@ -46,11 +49,18 @@
 // has exactly one live home at every call of less, the one less is given,
 // but the slice itself is a permutation of its input between two calls only
 // while no value is held out of it: during an insertion sort's shift
-// (PdqInsertFrom: Sort's leaves, SortStable's base runs and second buffer,
-// SortStableIn's runs), the Lomuto partition (an element of at most 32
-// bytes) and a merge through SortStable's cache, a slot keeps a stale copy
+// (PdqInsertFrom: Sort's leaves, StableSort's base runs and second buffer,
+// DriftSort's small sorts), the Lomuto partition (an element of at most 32
+// bytes), a merge through StableSort's cache, and DriftSort's partitions
+// and merges through its scratch (core_drift.mk), a slot keeps a stale copy
 // until the move that fills it, so a less that reads the slice through a
 // capture may see one value twice and another not at all.
+//
+// Search's unsafe block only reads, and rests on its loop's invariant
+// rather than on a check: i + n <= Len() whatever less answers, so each
+// probe, i + ceil(n/2) - 1, is an element of s; tests_search.mk runs every
+// length from 0 to 300 inside a guard band, under answers of less that
+// follow no order, and fails on any probe outside s.
 
 import std.raw
 
@@ -676,13 +686,28 @@ Pdq[T](s: mut []T, a0: int, b0: int, limit0: int, const less: fn(&T, &T): bool) 
     }
 }
 
-/// Sorts the elements by less, in place, keeping equal elements in their
-/// order. O(n log n) calls of less and O(n log n) swaps on every input;
-/// allocates nothing. SortStableIn gives the same order, using scratch
-/// memory from an allocator. The algorithm is a block merge sort.
+/// Sorts the elements by less, keeping equal elements in their order.
+/// O(n log n) calls of less and moves on every input. It allocates: past
+/// 20 elements it merges through scratch memory of Len() / 2 elements or
+/// more (the whole slice while that is at most 8,000,000 bytes), on the
+/// stack when that fits in 4,096 bytes and T is aligned to at most 8, else
+/// from the process heap, freed before it returns; through scratch, input
+/// that is already sorted or strictly descending costs O(n). When its
+/// scratch is larger than the stack's and the heap is out of memory, at
+/// compile time or in a freestanding program, it sorts in place instead,
+/// with the same result. SortStableIn takes the scratch from an allocator
+/// it is given. The algorithm is Rust's driftsort, and in place a block
+/// merge sort.
 export Slice[T].SortStable(mut self, const less: fn(&T, &T): bool) {
     s := self.ItemsMut()
-    StableSort(s, less)
+    // A short slice is one insertion sort (StableSort's and DriftStable's
+    // first step), here, so it enters no frame that holds a stack scratch
+    // or cache.
+    if s.Len() <= DriftInsertMax {
+        PdqInsertion(s, 0, s.Len(), less)
+        return
+    }
+    DriftStable(s, less)
 }
 
 /// Binary search: on a slice where less(element, key) holds for a prefix
@@ -692,15 +717,25 @@ export Slice[T].SortStable(mut self, const less: fn(&T, &T): bool) {
 /// some index from 0 to Len(). O(log n), at most ceil(log2(n + 1)) calls of
 /// less; allocates nothing and never panics.
 export Slice[T].Search[K](&self, key: &K, const less: fn(&T, &K): bool): int {
+    // The answer lies from i to i + n, both included. Each step asks less
+    // of element i + h - 1, h = ceil(n/2): when it holds the answer lies
+    // from i + h to i + n, else from i to i + h - 1; either way n becomes
+    // floor(n/2), which covers both (h - 1 <= floor(n/2) = n - h). So the
+    // run of n, and the count of calls, bit length of Len(), depend only on
+    // the length: the loop's branch goes the same way on every search, and
+    // the answer of less only picks i, by raw.Select, a conditional move,
+    // so a random key costs no misprediction (Rust's binary_search and
+    // Zig's partitionPoint loop so too).
     s := self.Items()
     var i := 0
-    var j := s.Len()
-    for i < j {
-        h := i + (j - i) / 2
-        if less(&s[h], key) {
-            i = h + 1
-        } else {
-            j = h
+    var n := s.Len()
+    unsafe "i + n <= s.Len() holds on entry and after each step whatever less answers (n shrinks by h every step, and i grows by h or by 0), and h >= 1 while n > 0, so i + h - 1 is in 0..s.Len(): the wrapping ops cannot wrap and each read is of an element of s" {
+        p := raw.Data(s)
+        for n > 0 {
+            h := n -% (n >> 1)
+            j := i +% h
+            i = raw.Select(less(&*raw.Offset(p, j -% 1), key), j, i)
+            n = n >> 1
         }
     }
     return i

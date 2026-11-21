@@ -49,7 +49,7 @@ func TestSliceArgMemcpy(t *testing.T) {
 		it := e.items.Get(b.Item)
 		u.Funcs = append(u.Funcs, Func{Symbol: "mk." + it.Key.String(), Key: it.Key.String(), Item: b.Item, Body: b, Pack: min(i, 1)})
 	}
-
+	u = cCallable(u) // the C ABI's Indirect copies (internalabi_test.go)
 	win := emitNoValidate(t, e, u, types.X86_64Windows, types.Release)
 	caller := fnText(win, "mk.main.Caller")
 	copies := regexp.MustCompile(`call void @llvm\.memcpy\.p0\.p0\.i64\(ptr align 8 (%v\d+), ptr align 8 (%p\d), i64 16, i1 false\)`).FindAllStringSubmatch(caller, -1)

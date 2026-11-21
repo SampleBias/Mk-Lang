@@ -314,6 +314,15 @@ var intrinsics = map[string]intrinsicFunc{
 	"std.raw.SqrtF64": func(m *Machine, f *frame, t *mir.Terminator, _ types.FnRef) {
 		m.store(m.dest(f, t), f64bits(math.Sqrt(f64of(m.argU(f, t, 0)))))
 	},
+	// Select copies a or b whole, as an assignment would: T is Plain.
+	"std.raw.Select": func(m *Machine, f *frame, t *mir.Terminator, _ types.FnRef) {
+		op := m.argOp(f, t, 2)
+		if m.argU(f, t, 0) != 0 {
+			op = m.argOp(f, t, 1)
+		}
+		dst := m.dest(f, t)
+		m.writeOp(f, op, loc{a: dst.a, off: dst.off, ti: m.operandTI(f, op)})
+	},
 	"std.raw.Atomic:New": func(m *Machine, f *frame, t *mir.Terminator, _ types.FnRef) {
 		dst := m.dest(f, t)
 		m.writeOp(f, m.argOp(f, t, 0), loc{a: dst.a, off: dst.off, ti: m.operandTI(f, m.argOp(f, t, 0))})

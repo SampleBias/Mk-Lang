@@ -1,8 +1,10 @@
 // Why: the parser's one-step paths (Parser.PathRun, IsPlainDomain,
-// SerializeSame) skip work, so they must give what the full steps give.
-// What: TestStdUrl_PathModel, TestStdUrl_HostModel and TestStdUrl_SameAsFull.
+// SerializeSame, ParsePlain) skip work, so they must give what the full
+// steps give.
+// What: TestStdUrl_PathModel, TestStdUrl_HostModel, TestStdUrl_SameAsFull
+// and TestStdUrl_PlainForm.
 // How: random paths and hosts against Go models of the URL Standard's path
-// state and host parser; SerializeSame against Serialize.
+// state and host parser; SerializeSame and ParsePlain against Serialize.
 
 package std
 
@@ -360,6 +362,99 @@ func TestStdUrl_SameAsFull(t *testing.T) {
 			}
 			if failed > 20 {
 				t.Fatalf("%s: too many failures", mode)
+			}
+		}
+	}
+}
+
+// TestStdUrl_PlainForm: ParsePlain takes the inputs it is for (the bench's
+// shapes among them) and refuses each kind of input it must leave to the
+// state machine, and on every case Parse answers as it does with a tab
+// added, which ParsePlain never takes.
+func TestStdUrl_PlainForm(t *testing.T) {
+	cases := []struct {
+		input string
+		plain bool
+	}{
+		{"http://example.com/", true},
+		{"https://a.b.c.org:8443/x/y/?q=1&r=#frag", true},
+		{"HTTP://Example.COM/p", true},
+		{"Ws://h:3000/", true},
+		{"wss://10.1.2.3:3000/a", true},
+		{"ftp://h/~a-b_c/", true},
+		{"ws://h:0/", true},
+		{"http://h:65535/", true},
+		{"http://h/?a#b#c", true},
+		{"http://h/p?q?r", true},
+		{"http://a..b/", true},
+		{"http://h//x", true},
+		{"http://xn--a.com/", true},
+		{"http://h/a|b", true},
+		{"http://h", false},
+		{"http://h?q", false},
+		{"http://h#f", false},
+		{"http://h:/", false},
+		{"http://h:80/", false},
+		{"https://h:443/", false},
+		{"ftp://h:21/", false},
+		{"http://h:0080/", false},
+		{"http://h:08080/", false},
+		{"http://h:65536/", false},
+		{"http://h:123456/", false},
+		{"http://u@h/", false},
+		{"http://u:p@h/", false},
+		{"http://h:8080@g/", false},
+		{"http://[::1]/", false},
+		{"http://h%41/", false},
+		{"http://h\\x", false},
+		{"http:\\\\h/", false},
+		{"http:/h/", false},
+		{"http:h/", false},
+		{"http:///h/", false},
+		{"file:///x", false},
+		{"sc://h/", false},
+		{"httpx://h/", false},
+		{"h://h/", false},
+		{"http://0x7f.1/", false},
+		{"http://1.2.3/", false},
+		{"http://01.2.3.4/", false},
+		{"http://1.2.3.4./", false},
+		{"http://256.1.1.1/", false},
+		{"http://a.1/", false},
+		{"http://h/a/../b", false},
+		{"http://h/./b", false},
+		{"http://h/%2e/", false},
+		{"http://h/a/..", false},
+		{"http://h/a/%2E%2e", false},
+		{"http://h/a%2E%2e", true},
+		{"http://h/a b", false},
+		{"http://h/a\t", false},
+		{" http://h/", false},
+		{"http://h/ ", false},
+		{"http://h/\u00e9", false},
+		{"http://\u00e9.com/", false},
+		{"http://h/a^b", false},
+		{"http://h/?a b", false},
+		{"http://h/?'", false},
+		{"http://h/#a b", false},
+		{"http://h/#`", false},
+	}
+	var records []string
+	for _, c := range cases {
+		tab, ok := urlTabbed(c.input)
+		if !ok {
+			t.Fatalf("%q: no tab place", c.input)
+		}
+		records = append(records, "plain "+urlHex(c.input), "parse "+urlHex(c.input)+" -", "parse "+urlHex(tab)+" -")
+	}
+	for _, mode := range urlModes {
+		answers := urlAsk(t, mode, records)
+		for i, c := range cases {
+			if want := fmt.Sprintf("ok %v", c.plain); answers[3*i] != want {
+				t.Errorf("%s: %q: ParsePlain %s, want %s", mode, c.input, answers[3*i], want)
+			}
+			if x, y := answers[3*i+1], answers[3*i+2]; !urlSameAnswersTab(x, y, c.input) {
+				t.Errorf("%s: %q:\n as given %s\n tabbed   %s", mode, c.input, x, y)
 			}
 		}
 	}
